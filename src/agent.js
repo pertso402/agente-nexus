@@ -27,6 +27,7 @@ function buildSystemPrompt(rascunho) {
       rascunho.tipo_entrega      && `- Entrega: ${rascunho.tipo_entrega}`,
       rascunho.endereco          && `- Endereço: ${rascunho.endereco}`,
       rascunho.forma_pagamento   && `- Pagamento: ${rascunho.forma_pagamento}`,
+      rascunho.cupom_codigo      && `- Cupom: ${rascunho.cupom_codigo}`,
     ].filter(Boolean);
 
     estado = `\n\n## ESTADO ATUAL DO PEDIDO (já coletado — NÃO pergunte de novo)\n${linhas.join('\n') || '- (vazio)'}`;
@@ -70,6 +71,7 @@ Regras transversais do fluxo:
 💳 Pagamento: [forma]
 🛍️ Subtotal: R$ X,XX
 🚴 Taxa de entrega: R$ X,XX  ← só se for delivery
+🎟️ Desconto (cupom): -R$ X,XX  ← só se tiver cupom válido
 💰 *Total: R$ X,XX*
 
 _Responde *SIM* pra eu fechar o pedido, ou me diz se quer mudar algo._`;
@@ -179,6 +181,7 @@ async function confirmarPedido(rascunho, telefone, requestId) {
         endereco:       rascunho.endereco,
         formaPagamento: rascunho.forma_pagamento,
         itens:          rascunho.itens,
+        cupomCodigo:    rascunho.cupom_codigo || null,
       }),
       { tentativas: 2, requestId, etapa: 'confirmarPedido' }
     );

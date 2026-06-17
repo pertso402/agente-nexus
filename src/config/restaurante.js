@@ -22,5 +22,8 @@ module.exports = {
    - Delivery: peça o endereço completo (rua, número, bairro).
    - Retirada: confirme que o cliente vai buscar.
 8. Pergunte a forma de pagamento: PIX, dinheiro (com troco?) ou cartão.
-9. Salve tudo com salvar_dados_pedido e aguarde o sistema pedir o resumo final.`,
+9. Pergunte se o cliente tem cupom de desconto. Se sim, chame verificar_cupom com o código informado.
+   - Se válido: informe o desconto e chame salvar_dados_pedido com o cupom_codigo.
+   - Se inválido: informe o motivo e siga sem desconto.
+10. Salve tudo com salvar_dados_pedido e aguarde o sistema pedir o resumo final.`,
 };

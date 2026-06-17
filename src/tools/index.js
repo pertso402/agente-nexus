@@ -1,6 +1,7 @@
 'use strict';
 
 const db = require('../services/supabase');
+const { verificarCupom } = require('../services/supabase');
 const cfg = require('../config/restaurante');
 const { descreverFaltando, calcularSubtotal, parseItens } = require('../utils/pedido');
 
@@ -59,8 +60,24 @@ const TOOL_SALVAR = {
         tipo_entrega:    { type: 'string', enum: ['delivery', 'retirada'] },
         endereco:        { type: 'string' },
         forma_pagamento: { type: 'string', enum: ['pix', 'dinheiro', 'cartao'] },
+        cupom_codigo: { type: 'string', description: 'Código do cupom (preencher após verificar_cupom retornar válido)' },
       },
       required: [],
+    },
+  },
+};
+
+const TOOL_CUPOM = {
+  type: 'function',
+  function: {
+    name: 'verificar_cupom',
+    description: 'Verifica se um código de cupom é válido e retorna o percentual de desconto. Use quando o cliente informar um código de cupom.',
+    parameters: {
+      type: 'object',
+      properties: {
+        codigo: { type: 'string', description: 'Código do cupom informado pelo cliente' },
+      },
+      required: ['codigo'],
     },
   },
 };
@@ -78,7 +95,7 @@ const TOOL_STATUS = {
   },
 };
 
-const TOOLS = [TOOL_CARDAPIO, TOOL_INFO, TOOL_SALVAR, TOOL_STATUS];
+const TOOLS = [TOOL_CARDAPIO, TOOL_INFO, TOOL_SALVAR, TOOL_CUPOM, TOOL_STATUS];
 
 async function executarTool(nome, args, contexto = {}) {
   const { telefone } = contexto;
@@ -132,6 +149,7 @@ async function executarTool(nome, args, contexto = {}) {
       if (args.tipo_entrega)    campos.tipo_entrega    = args.tipo_entrega;
       if (args.endereco)        campos.endereco        = args.endereco;
       if (args.forma_pagamento) campos.forma_pagamento = args.forma_pagamento;
+      if (args.cupom_codigo)    campos.cupom_codigo    = args.cupom_codigo;
 
       if (!Object.keys(campos).length) {
         return 'Nada para salvar. Envie pelo menos um campo.';
@@ -166,6 +184,19 @@ async function executarTool(nome, args, contexto = {}) {
       }
 
       return JSON.stringify(resumo);
+    }
+
+    case 'verificar_cupom': {
+      const resultado = await verificarCupom(args.codigo || '');
+      if (!resultado.valido) {
+        return JSON.stringify({ valido: false, motivo: resultado.motivo });
+      }
+      return JSON.stringify({
+        valido: true,
+        desconto_percentual: resultado.desconto_percentual,
+        mensagem: `Cupom válido! Desconto de ${resultado.desconto_percentual}% aplicado.`,
+        instrucao: 'Chame salvar_dados_pedido com cupom_codigo para registrar o desconto.',
+      });
     }
 
     case 'atualizar_status_pedido': {

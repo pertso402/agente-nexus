@@ -154,7 +154,8 @@ app.post('/webhook', async (req, res) => {
 
         let txt;
         const linhaTaxa = r.taxaEntrega > 0 ? `🚴 Taxa de entrega: ${fmt(r.taxaEntrega)}\n` : '';
-        const corpo = `🛍️ Subtotal: ${fmt(r.subtotal)}\n` + linhaTaxa + `💰 *Total: ${fmt(r.total)}*\n\n`;
+        const linhaDesconto = r.desconto > 0 ? `🎟️ Desconto (cupom): -${fmt(r.desconto)}\n` : '';
+        const corpo = `🛍️ Subtotal: ${fmt(r.subtotal)}\n` + linhaTaxa + linhaDesconto + `💰 *Total: ${fmt(r.total)}*\n\n`;
 
         if (r.formaPagamento === 'pix') {
           const info = await buscarInfo();
