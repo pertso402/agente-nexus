@@ -1,5 +1,7 @@
 'use strict';
 
+// Tudo via OpenAI: Whisper para áudio, GPT-4o para análise de imagem.
+
 const OpenAI = require('openai');
 const FormData = require('form-data');
 const axios = require('axios');
@@ -7,6 +9,8 @@ const axios = require('axios');
 function getClient() {
   return new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 }
+
+// ─── TRANSCRIÇÃO DE ÁUDIO (Whisper) ──────────────────────────────────────────
 
 async function transcreverAudio(base64, mimetype = 'audio/ogg') {
   const buffer = Buffer.from(base64, 'base64');
@@ -34,6 +38,8 @@ async function transcreverAudio(base64, mimetype = 'audio/ogg') {
   if (!data?.text) throw new Error('Whisper não retornou transcrição.');
   return data.text.trim();
 }
+
+// ─── ANÁLISE DE IMAGEM (GPT-4o Vision) ───────────────────────────────────────
 
 async function analisarImagem(base64, mimetype = 'image/jpeg') {
   const openai = getClient();

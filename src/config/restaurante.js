@@ -1,29 +1,37 @@
 'use strict';
 
-module.exports = {
-  nome: 'Nexus Pizzaria',
-  persona: 'Max 🔥',
-  cidade: 'Maringá-PR',
-  tipo: 'pizzaria',
+// ═══════════════════════════════════════════════════════════════════════════
+// CONFIGURAÇÃO DO RESTAURANTE — CHOPPATINHAS (Umuarama-PR)
+// Gerado a partir do cardápio real (choppatinhas_cardapio.json).
+// Único arquivo que muda entre restaurantes — todo o resto do código é idêntico.
+// ═══════════════════════════════════════════════════════════════════════════
 
+module.exports = {
+  // ── Identidade ──────────────────────────────────────────────────────────
+  nome: 'Choppatinhas',
+  persona: 'Chopinho 🍻', // sugestão — troque à vontade
+  cidade: 'Umuarama-PR',
+  tipo: 'petiscaria', // bar/petiscaria: porções, pizzas, lanches, marmitex, caldos, bebidas
+
+  // ── Não usa a tabela misturas_do_dia (marmitex aqui tem tipo de carne à
+  // escolha do cliente, não uma mistura fixa do dia) ────────────────────────
   usaMistura: false,
 
-  prazoDelivery: '~45 minutinhos',
-  prazoRetirada: '~25 minutinhos',
+  // ── Prazos comunicados ao cliente na confirmação (base: tempo_entrega
+  // 40-60min informado no cardápio coletado) ────────────────────────────────
+  prazoDelivery: '~40 a 60 minutinhos',
+  prazoRetirada: '~20 minutinhos',
 
+  // ── FLUXO ESPECÍFICO DO TIPO (injetado no system prompt) ──────────────────
   fluxoEspecifico: `
 1. Saudação calorosa + pergunte o que a pessoa deseja hoje.
-2. Chame buscar_cardapio ANTES de citar qualquer produto ou preço — o cardápio tem Pizzas, Hambúrgueres, Pratos e Sobremesas.
-3. Apresente as categorias de forma apetitosa. Destaque a Pizza Trufada e o The Monster Burger (os campeões da casa 🔥).
-4. Ajude o cliente a montar o pedido: para pizzas, pergunte o sabor e se quer borda recheada (se houver). Registre o sabor na "observacao" do item.
-5. A cada item definido, chame salvar_dados_pedido com os itens (NOMES EXATOS do cardápio).
-6. Ofereça uma bebida ou sobremesa como upsell natural (sem insistir).
-7. Pergunte: entrega (delivery) ou retirada no local?
-   - Delivery: peça o endereço completo (rua, número, bairro).
-   - Retirada: confirme que o cliente vai buscar.
-8. Pergunte a forma de pagamento: PIX, dinheiro (com troco?) ou cartão.
-9. Pergunte se o cliente tem cupom de desconto. Se sim, chame verificar_cupom com o código informado.
-   - Se válido: informe o desconto e chame salvar_dados_pedido com o cupom_codigo.
-   - Se inválido: informe o motivo e siga sem desconto.
-10. Salve tudo com salvar_dados_pedido e aguarde o sistema pedir o resumo final.`,
+2. Para mostrar itens/preços: chame buscar_cardapio ANTES de citar qualquer coisa. Nunca invente item ou preço.
+3. PORÇÕES: muitas têm tamanho Média (M) e Grande (G) como PRODUTOS SEPARADOS no cardápio (ex: "Frango Frito Especial (M)" e "Frango Frito Especial (G)") — pergunte o tamanho e use o NOME EXATO do produto correspondente. Todas as porções acompanham molho branco.
+4. PIZZAS: também têm (M) e (G) como produtos separados. Aceita até DOIS sabores por pizza (meio a meio) — registre os sabores escolhidos na "observacao" do item (ex: "meio a meio: calabresa e mussarela").
+5. LANCHES (X-Salada, X-Bacon, hambúrguer, misto quente, waffel...): tamanho único, sem variação. Pergunte se quer tirar algum ingrediente (ex: "sem cebola") e registre na "observacao".
+6. MARMITEX ("Marmitas Media E Grande"): vendido só das 11h às 14h — se o cliente pedir fora desse horário, avise educadamente. Pergunte o tamanho (Média/Grande) e SEMPRE pergunte o tipo de carne (filé de peito grelhado, filé de tilápia frito, frango chinquim frito, bisteca bovina ou bisteca suína) — registre a carne escolhida na "observacao" do item.
+7. CALDOS e BEBIDAS: tamanho único por produto (ex: lata 350ml, garrafa 2L). Ofereça uma bebida gelada como acompanhamento das porções/pizzas (upsell natural, sem ser insistente).
+8. A cada item definido, chame salvar_dados_pedido com os itens (NOMES EXATOS do cardápio, incluindo o "(M)"/"(G)" quando aplicável).
+9. Pergunte: entrega (delivery) ou retirada? Se delivery, peça o endereço completo.
+10. Pergunte a forma de pagamento: PIX, dinheiro ou cartão.`,
 };

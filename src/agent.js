@@ -16,18 +16,22 @@ const MODEL = 'gpt-4o';
 const MAX_TOKENS = 1024;
 const MAX_ITER = 8;
 
+// ─── SYSTEM PROMPT ────────────────────────────────────────────────────────────
+// Esqueleto genérico (igual para todo restaurante) + bloco específico do tipo
+// vindo de config/restaurante.js. A LLM só conversa e extrai; o CÓDIGO controla
+// o estado, valida e cria o pedido — por isso o fluxo nunca "fura".
+
 function buildSystemPrompt(rascunho) {
   let estado = '';
   if (rascunho) {
     const av = avaliarRascunho(rascunho);
     const itens = parseItens(rascunho.itens);
     const linhas = [
-      itens.length               && `- Itens: ${itens.map(i => `${i.quantidade}x ${i.nome}${i.observacao ? ` (${i.observacao})` : ''}`).join(', ')}`,
-      rascunho.nome_cliente      && `- Nome: ${rascunho.nome_cliente}`,
-      rascunho.tipo_entrega      && `- Entrega: ${rascunho.tipo_entrega}`,
-      rascunho.endereco          && `- Endereço: ${rascunho.endereco}`,
-      rascunho.forma_pagamento   && `- Pagamento: ${rascunho.forma_pagamento}`,
-      rascunho.cupom_codigo      && `- Cupom: ${rascunho.cupom_codigo}`,
+      itens.length          && `- Itens: ${itens.map(i => `${i.quantidade}x ${i.nome}${i.observacao ? ` (${i.observacao})` : ''}`).join(', ')}`,
+      rascunho.nome_cliente && `- Nome: ${rascunho.nome_cliente}`,
+      rascunho.tipo_entrega && `- Entrega: ${rascunho.tipo_entrega}`,
+      rascunho.endereco     && `- Endereço: ${rascunho.endereco}`,
+      rascunho.forma_pagamento && `- Pagamento: ${rascunho.forma_pagamento}`,
     ].filter(Boolean);
 
     estado = `\n\n## ESTADO ATUAL DO PEDIDO (já coletado — NÃO pergunte de novo)\n${linhas.join('\n') || '- (vazio)'}`;
@@ -38,10 +42,14 @@ function buildSystemPrompt(rascunho) {
     }
   }
 
-  return `Você é "${cfg.persona}", o atendente virtual do ${cfg.nome}.
+  const regraMistura = cfg.usaMistura
+    ? '\n⛔ Ao falar de marmitex, SEMPRE chame buscar_mistura_do_dia antes — nunca invente a mistura.'
+    : '';
+
+  return `Você é "${cfg.persona}", o atendente virtual do ${cfg.nome}${cfg.cidade ? ` (${cfg.cidade})` : ''}.
 
 ## PERSONALIDADE
-- Caloroso, animado, ágil e objetivo. Português brasileiro natural, com energia e bom humor.
+- Caloroso, simpático, ágil e objetivo. Português brasileiro natural, com leveza e bom humor.
 - Emojis com moderação. Trate o cliente pelo nome quando souber.
 - Mensagens curtas e claras (é WhatsApp). Conduza a conversa — não deixe o cliente perdido.${estado}
 
@@ -53,8 +61,10 @@ ${cfg.fluxoEspecifico}
 
 Regras transversais do fluxo:
 - SEMPRE que coletar algo, chame salvar_dados_pedido (pode ser um campo só). O retorno te diz o que ainda falta.
-- Personalizações do item (sabor, ponto da carne, "sem cebola", borda) vão no campo "observacao" daquele item.
+- Assim que o cliente escolher um item, salve e CONFIRME de volta o item e o preço que o sistema registrou (ex: "Anotei: 1× [item] — R$ X ✅ Mais alguma coisa?"). Só avance após esse eco — é o que evita registrar o item errado.
+- Personalizações do item (sabor, meio a meio, ponto da carne, "sem cebola", borda) vão no campo "observacao" daquele item.
 - Quando o retorno disser "PRONTO_PARA_CONFIRMACAO": apresente o RESUMO FINAL e peça *SIM*.
+- Após o pedido confirmado por PIX, o sistema envia a chave. Quando chegar "📎 COMPROVANTE PIX CONFIRMADO", chame atualizar_status_pedido com "aguardando_preparo" e agradeça.
 
 ## REGRAS CRÍTICAS (NUNCA quebrar)
 ⛔ NUNCA invente produtos, preços, chave PIX ou horário — sempre use as tools. Os preços vêm do sistema.
@@ -63,19 +73,22 @@ Regras transversais do fluxo:
 ⛔ NUNCA diga que o pedido foi confirmado/registrado por conta própria — quem confirma é o SISTEMA após o cliente dizer SIM.
 ⛔ Se um item não existir no cardápio (a tool avisa em "itens_nao_encontrados"), peça para o cliente escolher um nome válido.
 ⛔ Se a loja estiver fechada (info_restaurante → loja_aberta:false), informe o horário e não monte pedido.
+⛔ ATENÇÃO LITERAL a tamanho, sabor e quantidade (pequena ≠ média ≠ grande; um sabor ≠ outro). Use EXATAMENTE o que o cliente falou nesta mensagem. Na menor dúvida, pergunte — nunca chute.
+⛔ Cada pedido é INDEPENDENTE. Monte os itens SÓ com o que o cliente pediu NESTA conversa. IGNORE itens de pedidos anteriores já finalizados que apareçam no histórico.${regraMistura}
 
 ## FORMATO DO RESUMO FINAL (obrigatório antes do SIM)
-🔥 *Confira seu pedido:*
+🎩 *Confira seu pedido:*
 [qtd]x [item] — R$ [valor] (uma linha por item)
 📍 [Entrega no endereço X | Retirada no local]
 💳 Pagamento: [forma]
 🛍️ Subtotal: R$ X,XX
 🚴 Taxa de entrega: R$ X,XX  ← só se for delivery
-🎟️ Desconto (cupom): -R$ X,XX  ← só se tiver cupom válido
-💰 *Total: R$ X,XX*
+💰 *Total: R$ X,XX*  ← subtotal + taxa
 
 _Responde *SIM* pra eu fechar o pedido, ou me diz se quer mudar algo._`;
 }
+
+// ─── LOOP PRINCIPAL DO AGENTE ─────────────────────────────────────────────────
 
 async function rodarAgente(mensagemUsuario, historico, rascunho, requestId, telefone) {
   const openai = getClient();
@@ -161,6 +174,9 @@ async function rodarAgente(mensagemUsuario, historico, rascunho, requestId, tele
   return textoFinal;
 }
 
+// ─── CONFIRMAR PEDIDO (acionado pelo SIM do cliente, no código) ──────────────
+// Cria o pedido diretamente. Trava anti-duplicação: vira a etapa ANTES de criar.
+
 async function confirmarPedido(rascunho, telefone, requestId) {
   const av = avaliarRascunho(rascunho);
   if (!av.completo) {
@@ -169,6 +185,7 @@ async function confirmarPedido(rascunho, telefone, requestId) {
     throw erro;
   }
 
+  // Trava: marca como "processando" para que um SIM duplicado não reentre
   await salvarRascunho(telefone, { etapa_atual: 'processando' });
 
   let resultado;
@@ -181,12 +198,11 @@ async function confirmarPedido(rascunho, telefone, requestId) {
         endereco:       rascunho.endereco,
         formaPagamento: rascunho.forma_pagamento,
         itens:          rascunho.itens,
-        cupomCodigo:    rascunho.cupom_codigo || null,
       }),
       { tentativas: 2, requestId, etapa: 'confirmarPedido' }
     );
   } catch (err) {
-    await salvarRascunho(telefone, { etapa_atual: 'aguardando_confirmacao' });
+    await salvarRascunho(telefone, { etapa_atual: 'aguardando_confirmacao' }); // reverte
     throw err;
   }
 

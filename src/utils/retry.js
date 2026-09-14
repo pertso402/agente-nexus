@@ -2,6 +2,10 @@
 
 const logger = require('../logger');
 
+/**
+ * Executa fn com retry e backoff exponencial.
+ * Só retenta em erros de rede/timeout, não em erros de negócio.
+ */
 async function comRetry(fn, { tentativas = 3, baseMs = 800, requestId, etapa } = {}) {
   let ultimoErro;
 
@@ -13,12 +17,16 @@ async function comRetry(fn, { tentativas = 3, baseMs = 800, requestId, etapa } =
       const reretentavel = isRetentavel(err);
 
       logger.warn(`retry/${etapa}`, `Tentativa ${i + 1}/${tentativas} falhou${reretentavel ? ', tentando novamente' : ''}`, {
-        requestId, etapa, tentativa: i + 1, erro: err.message, retentavel: reretentavel,
+        requestId,
+        etapa,
+        tentativa: i + 1,
+        erro: err.message,
+        retentavel: reretentavel,
       });
 
       if (!reretentavel || i === tentativas - 1) break;
 
-      const aguardar = baseMs * Math.pow(2, i);
+      const aguardar = baseMs * Math.pow(2, i); // 800ms, 1600ms, 3200ms
       await sleep(aguardar);
     }
   }

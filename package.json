@@ -1,7 +1,7 @@
 {
-  "name": "agente-nexus",
+  "name": "choppatinhas-agente",
   "version": "1.0.0",
-  "description": "Agente de atendimento WhatsApp — Nexus Pizzaria",
+  "description": "Agente de atendimento WhatsApp do Choppatinhas",
   "main": "src/index.js",
   "scripts": {
     "start": "node src/index.js",

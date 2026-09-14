@@ -10,6 +10,8 @@ const sb = createClient(
   { realtime: { transport: ws } }
 );
 
+// ─── HISTÓRICO DE CONVERSA ────────────────────────────────────────────────────
+
 async function carregarHistorico(telefone, limite = 16) {
   const { data, error } = await sb
     .from('n8n_chat_histories')
@@ -36,6 +38,9 @@ async function salvarMensagem(telefone, role, content) {
   if (error) throw new Error(`Supabase/salvarMensagem: ${error.message}`);
 }
 
+// ─── RASCUNHO DO PEDIDO ───────────────────────────────────────────────────────
+// Fonte da verdade do estado do pedido. A etapa é SEMPRE recalculada pelo código.
+
 async function carregarRascunho(telefone) {
   const { data } = await sb
     .from('pedido_rascunho')
@@ -45,6 +50,7 @@ async function carregarRascunho(telefone) {
   return data || null;
 }
 
+// Merge parcial de baixo nível: nunca apaga campo que não veio.
 async function salvarRascunho(telefone, campos) {
   const update = { ...campos, updated_at: new Date().toISOString() };
 
@@ -63,21 +69,26 @@ async function salvarRascunho(telefone, campos) {
   }
 }
 
+// Alto nível: merge campos + valida itens + RECALCULA etapa determinística.
+// Retorna { rascunho, avaliacao, naoEncontrados }.
 async function atualizarRascunho(telefone, campos) {
   const atual = (await carregarRascunho(telefone)) || {};
 
   let naoEncontrados = [];
   const merge = { ...campos };
 
+  // Se vierem itens, valida contra o catálogo (preço REAL, nome canônico)
   if (campos.itens !== undefined) {
     const { itens, naoEncontrados: nf } = await validarItens(campos.itens);
     merge.itens = JSON.stringify(itens);
     naoEncontrados = nf;
   }
 
+  // Estado consolidado (atual + novos campos) para avaliar
   const consolidado = { ...atual, ...merge };
   const avaliacao = avaliarRascunho(consolidado);
 
+  // Código decide a etapa — a LLM nunca seta isso
   merge.etapa_atual = avaliacao.etapa;
 
   await salvarRascunho(telefone, merge);
@@ -89,6 +100,8 @@ async function atualizarRascunho(telefone, campos) {
 async function limparRascunho(telefone) {
   await sb.from('pedido_rascunho').delete().eq('telefone', telefone);
 }
+
+// ─── PRODUTOS / CARDÁPIO ──────────────────────────────────────────────────────
 
 async function buscarProdutos() {
   const { data, error } = await sb
@@ -105,6 +118,8 @@ function precoFinal(p) {
   return p.preco_promocional != null ? Number(p.preco_promocional) : Number(p.preco);
 }
 
+// Valida itens contra o catálogo: preço real, nome canônico, produto_id.
+// Itens sem correspondência voltam em naoEncontrados (não são salvos).
 async function validarItens(itensInput) {
   const produtos = await buscarProdutos();
   const itens = [];
@@ -162,8 +177,10 @@ async function buscarInfo() {
 async function getTaxaEntrega() {
   const info = await buscarInfo();
   const t = Number(info.taxa_entrega);
-  return Number.isFinite(t) ? t : 7;
+  return Number.isFinite(t) ? t : 5;
 }
+
+// ─── CLIENTES ─────────────────────────────────────────────────────────────────
 
 async function buscarOuCriarCliente(nome, telefone, endereco) {
   const tel = String(telefone).replace(/\D/g, '');
@@ -175,6 +192,7 @@ async function buscarOuCriarCliente(nome, telefone, endereco) {
     .maybeSingle();
 
   if (ex) {
+    // Atualiza nome/endereço se vieram (cliente pode ter mudado)
     const patch = {};
     if (nome) patch.nome = nome;
     if (endereco) patch.endereco = endereco;
@@ -205,22 +223,9 @@ async function atualizarStatsCliente(cliente, totalPedido) {
   if (error) throw new Error(`Supabase/atualizarStats: ${error.message}`);
 }
 
-async function verificarCupom(codigo, clienteId) {
-  const { data, error } = await sb
-    .from('cupons')
-    .select('id, desconto_percentual, valido_ate, usado')
-    .eq('codigo', codigo.toUpperCase().trim())
-    .maybeSingle();
+// ─── PEDIDOS ──────────────────────────────────────────────────────────────────
 
-  if (error) throw new Error(`Supabase/verificarCupom: ${error.message}`);
-  if (!data) return { valido: false, motivo: 'Cupom não encontrado.' };
-  if (data.usado) return { valido: false, motivo: 'Cupom já foi utilizado.' };
-  if (new Date(data.valido_ate) < new Date()) return { valido: false, motivo: 'Cupom expirado.' };
-
-  return { valido: true, cupomId: data.id, desconto_percentual: data.desconto_percentual };
-}
-
-async function criarPedidoCompleto({ nomeCliente, telefone, tipoEntrega, endereco, formaPagamento, itens, cupomCodigo }) {
+async function criarPedidoCompleto({ nomeCliente, telefone, tipoEntrega, endereco, formaPagamento, itens }) {
   const tel = String(telefone).replace(/\D/g, '');
   const listaItens = parseItens(itens);
   if (!listaItens.length) throw new Error('Pedido sem itens válidos.');
@@ -228,20 +233,7 @@ async function criarPedidoCompleto({ nomeCliente, telefone, tipoEntrega, enderec
   const subtotal = calcularSubtotal(listaItens);
   const taxaConfig = await getTaxaEntrega();
   const taxaEntrega = tipoEntrega === 'delivery' ? taxaConfig : 0;
-
-  let desconto = 0;
-  let cupomId = null;
-
-  if (cupomCodigo) {
-    const cliente = await buscarOuCriarCliente(nomeCliente, tel, endereco);
-    const validacao = await verificarCupom(cupomCodigo, cliente.id);
-    if (validacao.valido) {
-      cupomId = validacao.cupomId;
-      desconto = parseFloat((subtotal * validacao.desconto_percentual / 100).toFixed(2));
-    }
-  }
-
-  const total = parseFloat((subtotal + taxaEntrega - desconto).toFixed(2));
+  const total = parseFloat((subtotal + taxaEntrega).toFixed(2));
 
   const cliente = await buscarOuCriarCliente(nomeCliente, tel, endereco);
 
@@ -249,15 +241,13 @@ async function criarPedidoCompleto({ nomeCliente, telefone, tipoEntrega, enderec
     .from('pedidos')
     .insert({
       cliente_id: cliente.id,
-      status: 'confirmado',
+      status: 'pendente',
       tipo_entrega: tipoEntrega,
       endereco_entrega: endereco || null,
       forma_pagamento: formaPagamento,
       subtotal,
       taxa_entrega: taxaEntrega,
-      desconto,
       total,
-      cupom_id: cupomId,
       observacao: null,
     })
     .select('id, numero_pedido, total')
@@ -276,14 +266,9 @@ async function criarPedidoCompleto({ nomeCliente, telefone, tipoEntrega, enderec
   const { error: iErr } = await sb.from('itens_pedido').insert(rows);
   if (iErr) throw new Error(`Supabase/criarItens: ${iErr.message}`);
 
-  // Marcar cupom como usado
-  if (cupomId) {
-    await sb.from('cupons').update({ usado: true, pedido_id: pedido.id }).eq('id', cupomId);
-  }
-
   await atualizarStatsCliente(cliente, total);
 
-  return { numeroPedido: pedido.numero_pedido, total, subtotal, taxaEntrega, desconto, formaPagamento };
+  return { numeroPedido: pedido.numero_pedido, total, subtotal, taxaEntrega, formaPagamento };
 }
 
 async function atualizarStatusPedido(telefone, novoStatus) {
@@ -296,11 +281,11 @@ async function atualizarStatusPedido(telefone, novoStatus) {
     .from('pedidos')
     .select('id, numero_pedido, total')
     .eq('cliente_id', cli.id)
-    .in('status', ['confirmado', 'pendente'])
+    .eq('status', 'pendente')
     .order('created_at', { ascending: false })
     .limit(1);
-  if (error) throw new Error(`Supabase/buscarPedido: ${error.message}`);
-  if (!pedidos?.length) throw new Error('Nenhum pedido encontrado para este cliente.');
+  if (error) throw new Error(`Supabase/buscarPedidoPendente: ${error.message}`);
+  if (!pedidos?.length) throw new Error('Nenhum pedido pendente encontrado para este cliente.');
 
   const pedido = pedidos[0];
   const { error: uErr } = await sb.from('pedidos').update({ status: novoStatus }).eq('id', pedido.id);
@@ -313,5 +298,5 @@ module.exports = {
   carregarHistorico, salvarMensagem,
   carregarRascunho, salvarRascunho, atualizarRascunho, limparRascunho,
   buscarProdutos, validarItens, buscarMistura, buscarInfo, getTaxaEntrega,
-  buscarOuCriarCliente, criarPedidoCompleto, atualizarStatusPedido, verificarCupom,
+  buscarOuCriarCliente, criarPedidoCompleto, atualizarStatusPedido,
 };

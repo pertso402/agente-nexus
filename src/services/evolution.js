@@ -15,15 +15,17 @@ function cliente() {
 
 const INSTANCE = () => process.env.EVOLUTION_INSTANCE;
 
+// ─── EXTRAIR CAMPOS DO PAYLOAD EVOLUTION API v2 ───────────────────────────────
+
 function extrairMensagem(body) {
   const data = body.data || body;
   const key = data.key || {};
   const message = data.message || {};
   const messageType = data.messageType || Object.keys(message)[0] || 'conversation';
 
-  if (key.fromMe === true) return null;
+  if (key.fromMe === true) return null;                        // mensagem própria
   const remoteJid = key.remoteJid || '';
-  if (remoteJid.includes('@g.us')) return null;
+  if (remoteJid.includes('@g.us')) return null;                // grupo
 
   const telefone = remoteJid.replace('@s.whatsapp.net', '').replace('@c.us', '');
   const pushName = data.pushName || 'Cliente';
@@ -44,9 +46,10 @@ function extrairMensagem(body) {
     texto = '[Documento recebido]';
     tipo = 'text';
   } else {
-    return null;
+    return null; // tipo não suportado
   }
 
+  // Quando webhookBase64=true, Evolution já inclui o base64 no payload
   const base64   = data.base64   || message.base64   || null;
   const mimetype = data.mimetype || message.mimetype ||
     message.audioMessage?.mimetype || message.imageMessage?.mimetype || null;
@@ -54,14 +57,19 @@ function extrairMensagem(body) {
   return { telefone, pushName, tipo, texto, mensagemRaw: message, base64, mimetype };
 }
 
+// ─── DOWNLOAD DE MÍDIA ────────────────────────────────────────────────────────
+
 async function downloadMidia(mensagemRaw) {
   const { data } = await cliente().post(
     `/message/downloadMediaMessage/${INSTANCE()}`,
     { message: mensagemRaw }
   );
+  // Retorna { base64, mimetype }
   if (!data?.base64) throw new Error('Evolution não retornou base64 da mídia.');
   return data;
 }
+
+// ─── ENVIO DE MENSAGENS ───────────────────────────────────────────────────────
 
 async function enviarTexto(telefone, texto) {
   await cliente().post(`/message/sendText/${INSTANCE()}`, {

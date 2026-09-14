@@ -1,9 +1,13 @@
 'use strict';
 
+// ─── LÓGICA DE DOMÍNIO PURA DO PEDIDO ─────────────────────────────────────────
+// Sem acesso a banco. Funções determinísticas usadas para decidir o estado
+// do pedido. O CÓDIGO (não a LLM) é a fonte da verdade sobre o que falta.
+
 function normalizar(s) {
   return String(s || '')
     .toLowerCase()
-    .normalize('NFD').replace(/\p{Diacritic}/gu, '')
+    .normalize('NFD').replace(/\p{Diacritic}/gu, '') // remove acentos
     .replace(/\s+/g, ' ')
     .trim();
 }
@@ -17,6 +21,8 @@ function parseItens(itens) {
   return [];
 }
 
+// Avalia o rascunho e decide a etapa DETERMINISTICAMENTE.
+// etapa "aguardando_confirmacao" SÓ é atingida quando TUDO está presente.
 function avaliarRascunho(r = {}) {
   const itens = parseItens(r.itens);
   const faltando = [];

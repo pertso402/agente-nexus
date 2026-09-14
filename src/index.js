@@ -50,7 +50,7 @@ app.get('/health', (_req, res) => {
   res.json({
     status: 'ok',
     ts: new Date().toISOString(),
-    agente: `${cfg.persona} — ${cfg.nome}`,
+    agente: 'Choppatinhas v1',
     vars: {
       supa: !!process.env.SUPA_URL,
       openai: !!process.env.OPENAI_API_KEY,
@@ -128,7 +128,7 @@ app.post('/webhook', async (req, res) => {
       requestId, telefone, historico_msgs: historico.length, etapa: rascunho?.etapa_atual || 'sem rascunho',
     });
 
-    // ── FLUXO 1: comprovante PIX ──────────────────────────────────────────
+    // ── FLUXO 1: comprovante PIX (código atualiza status, não depende da LLM) ─
     if (isComprovante && rascunho?.etapa_atual === 'aguardando_pix') {
       logger.step(requestId, telefone, 'pix/comprovante-recebido');
       await enviarDigitando(telefone, 1200);
@@ -136,16 +136,17 @@ app.post('/webhook', async (req, res) => {
         const pedido = await comRetry(() => atualizarStatusPedido(telefone, 'aguardando_preparo'),
           { tentativas: 3, requestId, etapa: 'statusPreparo' });
         await limparRascunho(telefone);
-        const txt = `✅ Comprovante recebido, pagamento confirmado! Pedido *#${pedido.numero_pedido}* já tá indo pra cozinha 🔥\n\n⏱️ Logo logo fica pronto. Valeu, ${pushName}! 😎`;
+        const txt = `✅ Comprovante recebido, pagamento confirmado! Pedido *#${pedido.numero_pedido}* já tá indo pra cozinha 🍲\n\n⏱️ Logo logo fica pronto. Valeu, ${pushName}! 🎩`;
         await comRetry(() => enviarTexto(telefone, txt), { tentativas: 3, requestId, etapa: 'enviarPixOk' });
         await Promise.all([salvarMensagem(telefone, 'user', conteudo), salvarMensagem(telefone, 'assistant', txt)]);
         return;
       } catch (err) {
         logger.error('pix/comprovante/erro', err.message, { requestId, telefone, stack: err.stack });
+        // cai para o agente lidar
       }
     }
 
-    // ── FLUXO 2: confirmação SIM ──────────────────────────────────────────
+    // ── FLUXO 2: confirmação SIM (código cria o pedido) ──────────────────────
     if (ehConfirmacao(conteudo) && rascunho?.etapa_atual === 'aguardando_confirmacao') {
       logger.step(requestId, telefone, 'pedido/confirmando-via-SIM');
       await enviarDigitando(telefone, 1500);
@@ -154,19 +155,19 @@ app.post('/webhook', async (req, res) => {
 
         let txt;
         const linhaTaxa = r.taxaEntrega > 0 ? `🚴 Taxa de entrega: ${fmt(r.taxaEntrega)}\n` : '';
-        const linhaDesconto = r.desconto > 0 ? `🎟️ Desconto (cupom): -${fmt(r.desconto)}\n` : '';
-        const corpo = `🛍️ Subtotal: ${fmt(r.subtotal)}\n` + linhaTaxa + linhaDesconto + `💰 *Total: ${fmt(r.total)}*\n\n`;
+        const corpo =
+          `🛍️ Subtotal: ${fmt(r.subtotal)}\n` + linhaTaxa + `💰 *Total: ${fmt(r.total)}*\n\n`;
 
         if (r.formaPagamento === 'pix') {
           const info = await buscarInfo();
           const chave = info.chave_pix || 'não cadastrada';
           txt = `✅ Pedido *#${r.numeroPedido}* registrado!\n\n` + corpo +
             `📱 *Chave PIX:* \`${chave}\`\n\n` +
-            `Faz o PIX e me manda o comprovante aqui que eu já libero pra cozinha 🔥`;
+            `Faz o PIX e me manda o comprovante aqui que eu já libero pra cozinha 😊`;
         } else {
           const prazo = rascunho.tipo_entrega === 'delivery' ? cfg.prazoDelivery : cfg.prazoRetirada;
           txt = `✅ Pedido *#${r.numeroPedido}* confirmado!\n\n` + corpo +
-            `Já tá indo pra cozinha! ⏱️ Previsão: ${prazo}. Bom apetite, ${pushName}! 🔥`;
+            `Já tá indo pra cozinha! ⏱️ Previsão: ${prazo}. Bom apetite, ${pushName}! 🎩`;
         }
 
         await comRetry(() => enviarTexto(telefone, txt), { tentativas: 3, requestId, etapa: 'enviarConfirmacao' });
@@ -183,7 +184,7 @@ app.post('/webhook', async (req, res) => {
       }
     }
 
-    // ── FLUXO 3: agente conversacional ────────────────────────────────────
+    // ── FLUXO 3: agente conversacional ───────────────────────────────────────
     await enviarDigitando(telefone, 2500);
     const msgParaAgente = `[Cliente: ${pushName} | WhatsApp: ${telefone}]\n${conteudo}`;
     const resposta = await rodarAgente(msgParaAgente, historico, rascunho, requestId, telefone);
@@ -196,6 +197,7 @@ app.post('/webhook', async (req, res) => {
 
     await comRetry(() => enviarTexto(telefone, resposta), { tentativas: 3, requestId, etapa: 'enviarResposta' });
     logger.info('whatsapp/ok', 'Resposta enviada', { requestId, telefone, chars: resposta.length });
+
     await Promise.all([salvarMensagem(telefone, 'user', conteudo), salvarMensagem(telefone, 'assistant', resposta)]);
 
   } catch (err) {
@@ -207,7 +209,7 @@ app.post('/webhook', async (req, res) => {
 // ─── START ────────────────────────────────────────────────────────────────────
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
-  logger.info('servidor/start', `🔥 ${cfg.persona} (${cfg.nome}) rodando na porta ${PORT}`, {
+  logger.info('servidor/start', `🍻 Agente ${cfg.nome} rodando na porta ${PORT}`, {
     port: PORT,
     supa_url:  process.env.SUPA_URL       ? '✓' : '✗ FALTANDO',
     openai:    process.env.OPENAI_API_KEY ? '✓' : '✗ FALTANDO',
