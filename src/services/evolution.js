@@ -13,7 +13,9 @@ function cliente() {
   });
 }
 
-const INSTANCE = () => process.env.EVOLUTION_INSTANCE;
+// encodeURIComponent: o nome da instância pode ter espaço/acento (ex: "Agente teste"),
+// e o Node rejeita path com caractere não escapado (ERR_UNESCAPED_CHARACTERS).
+const INSTANCE = () => encodeURIComponent(process.env.EVOLUTION_INSTANCE || '');
 
 // ─── EXTRAIR CAMPOS DO PAYLOAD EVOLUTION API v2 ───────────────────────────────
 
