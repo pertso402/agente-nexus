@@ -2,7 +2,7 @@
 
 const db = require('../services/supabase');
 const cfg = require('../config/restaurante');
-const { descreverFaltando, calcularSubtotal, parseItens } = require('../utils/pedido');
+const { descreverFaltando, calcularSubtotal, parseItens, normalizar } = require('../utils/pedido');
 
 // Ordem das categorias: comida primeiro, bebidas/condimentos por último
 const ORDEM_CATEGORIA = {
@@ -15,14 +15,45 @@ function prioridadeCategoria(cat) {
   return ORDEM_CATEGORIA[k] ?? 5;
 }
 
+const moeda = v => `R$ ${Number(v).toFixed(2).replace('.', ',')}`;
+const precoDe = p => Number(p.preco_promocional != null ? p.preco_promocional : p.preco);
+
+// Os tamanhos viram produtos separados no banco ("Calabresa (M)" e "Calabresa (G)").
+// Aqui eles voltam a ser um produto só com dois preços, que é como se lê num cardápio.
+function agruparPorTamanho(produtos) {
+  const grupos = new Map();
+  for (const p of produtos) {
+    const nome = String(p.nome || '').trim();
+    const m = nome.match(/^(.*?)\s*\(([^()]+)\)$/);
+    const base = m ? m[1].trim() : nome;
+    const tam = m ? m[2].trim() : null;
+    if (!grupos.has(base)) grupos.set(base, { base, descricao: p.descricao || '', variantes: [] });
+    grupos.get(base).variantes.push({ tam, preco: precoDe(p) });
+  }
+  const ordem = { M: 0, P: 0, 'Media': 0, 'Média': 0, G: 1, 'Grande': 1 };
+  for (const g of grupos.values()) {
+    g.variantes.sort((a, b) => (ordem[a.tam] ?? 9) - (ordem[b.tam] ?? 9) || a.preco - b.preco);
+  }
+  return [...grupos.values()];
+}
+
 // ─── DEFINIÇÃO DAS TOOLS (formato OpenAI function calling) ───────────────────
 
 const TOOL_CARDAPIO = {
   type: 'function',
   function: {
     name: 'buscar_cardapio',
-    description: 'Retorna todos os produtos disponíveis com preços REAIS. Use SEMPRE antes de citar qualquer produto, preço ou quando o cliente quiser pedir. Nunca invente itens.',
-    parameters: { type: 'object', properties: {}, required: [] },
+    description: 'Preços REAIS do cardápio. Use SEMPRE antes de citar qualquer produto ou preço — nunca invente. Sem "categoria", devolve o resumo das seções (use quando pedirem "o cardápio", para o cliente escolher a seção). Com "categoria", devolve os itens daquela seção.',
+    parameters: {
+      type: 'object',
+      properties: {
+        categoria: {
+          type: 'string',
+          description: 'Seção do cardápio: Porções, Pizzas, Lanches, Caldos, Bebidas ou Marmitex. Omita para ver o resumo das seções.',
+        },
+      },
+      required: [],
+    },
   },
 };
 
@@ -115,18 +146,32 @@ async function executarTool(nome, args, contexto = {}) {
       }
       const ordenadas = Object.keys(cats).sort((a, b) => prioridadeCategoria(a) - prioridadeCategoria(b));
 
-      let txt = `📋 CARDÁPIO ${cfg.nome.toUpperCase()}\n\n`;
-      for (const cat of ordenadas) {
-        txt += `${cat.toUpperCase()}\n`;
-        for (const p of cats[cat]) {
-          const preco = p.preco_promocional != null ? p.preco_promocional : p.preco;
-          txt += `• ${p.nome.trim()} — R$ ${Number(preco).toFixed(2).replace('.', ',')}`;
-          if (p.descricao) txt += ` (${p.descricao})`;
-          txt += '\n';
+      // Sem categoria: resumo das seções. São ~96 produtos — despejar todos vira
+      // uma parede de texto no WhatsApp e o cliente desiste.
+      const alvo = args.categoria && ordenadas.find(c => normalizar(c) === normalizar(args.categoria));
+      if (!args.categoria || !alvo) {
+        let txt = `SEÇÕES DO CARDÁPIO (peça uma categoria para ver os itens)\n\n`;
+        for (const cat of ordenadas) {
+          const grupos = agruparPorTamanho(cats[cat]);
+          const precos = cats[cat].map(precoDe);
+          const min = Math.min(...precos), max = Math.max(...precos);
+          const exemplos = grupos.slice(0, 3).map(g => g.base).join(', ');
+          txt += `• ${cat} — ${grupos.length} opções, de ${moeda(min)} a ${moeda(max)}\n  ex: ${exemplos}\n`;
         }
-        txt += '\n';
+        if (args.categoria) txt += `\n(categoria "${args.categoria}" não existe; use uma das acima)`;
+        txt += `\n\nINSTRUÇÃO: apresente estas seções ao cliente e pergunte qual ele quer ver. NÃO liste produtos agora.`;
+        return txt;
       }
-      return txt.trim();
+
+      // Com categoria: itens daquela seção, com os tamanhos já juntos por produto.
+      let txt = `${alvo.toUpperCase()}\n\n`;
+      for (const g of agruparPorTamanho(cats[alvo])) {
+        const precos = g.variantes.map(v => v.tam ? `${v.tam} ${moeda(v.preco)}` : moeda(v.preco)).join(' | ');
+        txt += `• ${g.base} — ${precos}\n`;
+        if (g.descricao) txt += `  ${g.descricao}\n`;
+      }
+      txt += `\nINSTRUÇÃO: use EXATAMENTE estes nomes e preços. Ao salvar o item, o nome precisa incluir o tamanho entre parênteses, como está no cardápio.`;
+      return txt;
     }
 
     case 'buscar_mistura_do_dia': {

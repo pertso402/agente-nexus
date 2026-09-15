@@ -45,8 +45,9 @@ async function analisarImagem(base64, mimetype = 'image/jpeg') {
   const openai = getClient();
 
   const resposta = await openai.chat.completions.create({
-    model: 'gpt-4o',
-    max_tokens: 400,
+    model: 'gpt-5.5',
+    max_completion_tokens: 400,
+    response_format: { type: 'json_object' },
     messages: [
       {
         role: 'user',
@@ -57,21 +58,23 @@ async function analisarImagem(base64, mimetype = 'image/jpeg') {
           },
           {
             type: 'text',
-            text: 'Analise esta imagem. Responda em português:\n1. É um comprovante de pagamento PIX? (sim/não)\n2. Se sim: valor transferido, data/hora e nome do destinatário (se visível).\n3. Se não: descreva em 1 linha o que é.\nSeja direto e objetivo.',
+            text: 'Analise a imagem e responda em JSON: {"comprovante": true se for comprovante de pagamento (PIX/transferência) e false caso contrário, "resumo": "em português, 1 linha — se for comprovante, inclua valor, data/hora e destinatário visíveis; se não, descreva o que é"}',
           },
         ],
       },
     ],
   });
 
-  const analise = resposta.choices[0]?.message?.content || 'Não foi possível analisar a imagem.';
-  const lower = analise.toLowerCase();
-  const isComprovante =
-    (lower.includes('sim') && lower.includes('pix')) ||
-    lower.includes('comprovante') ||
-    lower.includes('transferência');
-
-  return { analise, isComprovante };
+  // O modelo responde em JSON: antes a detecção era por palavra-chave e uma
+  // resposta como "não é um comprovante" contava como comprovante válido,
+  // dando o pedido como pago sem pagamento.
+  const bruto = resposta.choices[0]?.message?.content || '';
+  try {
+    const j = JSON.parse(bruto);
+    return { analise: String(j.resumo || bruto), isComprovante: j.comprovante === true };
+  } catch {
+    return { analise: bruto || 'Não foi possível analisar a imagem.', isComprovante: false };
+  }
 }
 
 module.exports = { transcreverAudio, analisarImagem };

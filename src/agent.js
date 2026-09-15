@@ -12,7 +12,10 @@ function getClient() {
   return new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 }
 
-const MODEL = 'gpt-4o';
+// gpt-5.5: mais forte que o gpt-4o, ~2,5x mais rapido no fluxo real e formata
+// certo pro WhatsApp (o gpt-4o usava **negrito** de markdown, que aparece com os
+// asteriscos na tela). Modelos 5.6+ e gpt-6 nao aceitam function calling aqui.
+const MODEL = 'gpt-5.5';
 const MAX_TOKENS = 1024;
 const MAX_ITER = 8;
 
@@ -52,6 +55,27 @@ function buildSystemPrompt(rascunho) {
 - Caloroso, simpático, ágil e objetivo. Português brasileiro natural, com leveza e bom humor.
 - Emojis com moderação. Trate o cliente pelo nome quando souber.
 - Mensagens curtas e claras (é WhatsApp). Conduza a conversa — não deixe o cliente perdido.${estado}
+
+## COMO ESCREVER NO WHATSAPP (formatação)
+O WhatsApp NÃO entende markdown. Escreva no formato dele:
+- Negrito é *um asterisco só* de cada lado. NUNCA use **dois** — aparecem os asteriscos na tela do cliente.
+- Itálico é _underline_. Não existe título com #, nem tabela, nem link em [texto](url).
+- Listas: use "•" no começo da linha. Nada de "1." aninhado com traços e recuos.
+- Uma linha em branco separa blocos. Evite parágrafos longos.
+
+Ao LISTAR PRODUTOS, use exatamente este formato (nome em negrito, preço no fim da linha):
+🍕 *PIZZAS*
+
+• *Calabresa* — M R$ 67,00 | G R$ 80,00
+  _calabresa, mussarela e tomate_
+
+• *Portuguesa* — M R$ 62,00 | G R$ 75,00
+
+Regras da listagem:
+- Junte os tamanhos do mesmo produto NA MESMA linha (M e G juntos), nunca repita o nome.
+- A descrição vai embaixo, em itálico, e só quando ajudar a escolher — não repita o óbvio.
+- Máximo ~8 itens por mensagem. Se tiver mais, mostre os principais e ofereça o resto.
+- Termine sempre com uma pergunta curta que puxa o pedido ("Qual deles te agrada?").
 
 ## SEU OBJETIVO
 Conduzir o cliente do "oi" até o pedido confirmado, SEM falhar nenhuma etapa. Você coleta e organiza; o SISTEMA fecha o pedido.
@@ -109,7 +133,7 @@ async function rodarAgente(mensagemUsuario, historico, rascunho, requestId, tele
   let resposta = await comRetry(
     () => openai.chat.completions.create({
       model: MODEL,
-      max_tokens: MAX_TOKENS,
+      max_completion_tokens: MAX_TOKENS,
       messages: [systemMsg, ...messages],
       tools: TOOLS,
       tool_choice: 'auto',
@@ -150,7 +174,7 @@ async function rodarAgente(mensagemUsuario, historico, rascunho, requestId, tele
     resposta = await comRetry(
       () => openai.chat.completions.create({
         model: MODEL,
-        max_tokens: MAX_TOKENS,
+        max_completion_tokens: MAX_TOKENS,
         messages: [systemMsg, ...messages],
         tools: TOOLS,
         tool_choice: 'auto',
