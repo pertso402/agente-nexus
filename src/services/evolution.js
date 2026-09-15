@@ -29,7 +29,13 @@ function extrairMensagem(body) {
   const remoteJid = key.remoteJid || '';
   if (remoteJid.includes('@g.us')) return null;                // grupo
 
-  const telefone = remoteJid.replace('@s.whatsapp.net', '').replace('@c.us', '');
+  // Endereçamento LID: contatos migrados chegam com remoteJid = "<id>@lid" e o
+  // telefone em remoteJidAlt. A sessão de criptografia válida é a do LID — responder
+  // no JID de telefone falha na entrega (status ERROR), mesmo a API retornando 201.
+  // Por isso: responder SEMPRE no remoteJid recebido; guardar o telefone para o banco.
+  const jid = remoteJid;
+  const jidTelefone = key.remoteJidAlt || remoteJid;
+  const telefone = jidTelefone.replace(/@.*$/, '');
   const pushName = data.pushName || 'Cliente';
 
   let texto = '';
@@ -56,7 +62,7 @@ function extrairMensagem(body) {
   const mimetype = data.mimetype || message.mimetype ||
     message.audioMessage?.mimetype || message.imageMessage?.mimetype || null;
 
-  return { telefone, pushName, tipo, texto, mensagemRaw: message, base64, mimetype };
+  return { telefone, jid, pushName, tipo, texto, mensagemRaw: message, base64, mimetype };
 }
 
 // ─── DOWNLOAD DE MÍDIA ────────────────────────────────────────────────────────

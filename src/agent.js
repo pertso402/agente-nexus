@@ -77,7 +77,7 @@ Regras transversais do fluxo:
 ⛔ Cada pedido é INDEPENDENTE. Monte os itens SÓ com o que o cliente pediu NESTA conversa. IGNORE itens de pedidos anteriores já finalizados que apareçam no histórico.${regraMistura}
 
 ## FORMATO DO RESUMO FINAL (obrigatório antes do SIM)
-🎩 *Confira seu pedido:*
+🍻 *Confira seu pedido:*
 [qtd]x [item] — R$ [valor] (uma linha por item)
 📍 [Entrega no endereço X | Retirada no local]
 💳 Pagamento: [forma]

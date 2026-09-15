@@ -81,7 +81,8 @@ app.post('/webhook', async (req, res) => {
     return;
   }
 
-  const { telefone, pushName, tipo, mensagemRaw, base64: base64Inline, mimetype: mimetypeInline } = msg;
+  // telefone = identidade no banco | jid = endereço de resposta no WhatsApp (pode ser @lid)
+  const { telefone, jid, pushName, tipo, mensagemRaw, base64: base64Inline, mimetype: mimetypeInline } = msg;
   let conteudo = msg.texto;
 
   logger.step(requestId, telefone, 'webhook/recebido', { tipo, pushName, preview: (conteudo || '').slice(0, 60) });
@@ -131,13 +132,13 @@ app.post('/webhook', async (req, res) => {
     // ── FLUXO 1: comprovante PIX (código atualiza status, não depende da LLM) ─
     if (isComprovante && rascunho?.etapa_atual === 'aguardando_pix') {
       logger.step(requestId, telefone, 'pix/comprovante-recebido');
-      await enviarDigitando(telefone, 1200);
+      await enviarDigitando(jid, 1200);
       try {
         const pedido = await comRetry(() => atualizarStatusPedido(telefone, 'aguardando_preparo'),
           { tentativas: 3, requestId, etapa: 'statusPreparo' });
         await limparRascunho(telefone);
-        const txt = `✅ Comprovante recebido, pagamento confirmado! Pedido *#${pedido.numero_pedido}* já tá indo pra cozinha 🍲\n\n⏱️ Logo logo fica pronto. Valeu, ${pushName}! 🎩`;
-        await comRetry(() => enviarTexto(telefone, txt), { tentativas: 3, requestId, etapa: 'enviarPixOk' });
+        const txt = `✅ Comprovante recebido, pagamento confirmado! Pedido *#${pedido.numero_pedido}* já tá indo pra cozinha 🍲\n\n⏱️ Logo logo fica pronto. Valeu, ${pushName}! 🍻`;
+        await comRetry(() => enviarTexto(jid, txt), { tentativas: 3, requestId, etapa: 'enviarPixOk' });
         await Promise.all([salvarMensagem(telefone, 'user', conteudo), salvarMensagem(telefone, 'assistant', txt)]);
         return;
       } catch (err) {
@@ -149,7 +150,7 @@ app.post('/webhook', async (req, res) => {
     // ── FLUXO 2: confirmação SIM (código cria o pedido) ──────────────────────
     if (ehConfirmacao(conteudo) && rascunho?.etapa_atual === 'aguardando_confirmacao') {
       logger.step(requestId, telefone, 'pedido/confirmando-via-SIM');
-      await enviarDigitando(telefone, 1500);
+      await enviarDigitando(jid, 1500);
       try {
         const r = await confirmarPedido(rascunho, telefone, requestId);
 
@@ -167,10 +168,10 @@ app.post('/webhook', async (req, res) => {
         } else {
           const prazo = rascunho.tipo_entrega === 'delivery' ? cfg.prazoDelivery : cfg.prazoRetirada;
           txt = `✅ Pedido *#${r.numeroPedido}* confirmado!\n\n` + corpo +
-            `Já tá indo pra cozinha! ⏱️ Previsão: ${prazo}. Bom apetite, ${pushName}! 🎩`;
+            `Já tá indo pra cozinha! ⏱️ Previsão: ${prazo}. Bom apetite, ${pushName}! 🍻`;
         }
 
-        await comRetry(() => enviarTexto(telefone, txt), { tentativas: 3, requestId, etapa: 'enviarConfirmacao' });
+        await comRetry(() => enviarTexto(jid, txt), { tentativas: 3, requestId, etapa: 'enviarConfirmacao' });
         await Promise.all([salvarMensagem(telefone, 'user', conteudo), salvarMensagem(telefone, 'assistant', txt)]);
         return;
       } catch (err) {
@@ -178,31 +179,31 @@ app.post('/webhook', async (req, res) => {
         const falta = err.faltando?.length
           ? `Ainda preciso de: ${err.faltando.join(', ')}. Vamos completar?`
           : 'Tive um probleminha pra fechar o pedido. Pode me confirmar os dados de novo?';
-        await enviarTexto(telefone, `Opa! ${falta}`);
+        await enviarTexto(jid, `Opa! ${falta}`);
         await Promise.all([salvarMensagem(telefone, 'user', conteudo), salvarMensagem(telefone, 'assistant', falta)]);
         return;
       }
     }
 
     // ── FLUXO 3: agente conversacional ───────────────────────────────────────
-    await enviarDigitando(telefone, 2500);
+    await enviarDigitando(jid, 2500);
     const msgParaAgente = `[Cliente: ${pushName} | WhatsApp: ${telefone}]\n${conteudo}`;
     const resposta = await rodarAgente(msgParaAgente, historico, rascunho, requestId, telefone);
 
     if (!resposta) {
       logger.warn('agente/vazio', 'Agente retornou vazio', { requestId, telefone });
-      await enviarTexto(telefone, 'Desculpa, não entendi bem 😅 Pode repetir?');
+      await enviarTexto(jid, 'Desculpa, não entendi bem 😅 Pode repetir?');
       return;
     }
 
-    await comRetry(() => enviarTexto(telefone, resposta), { tentativas: 3, requestId, etapa: 'enviarResposta' });
+    await comRetry(() => enviarTexto(jid, resposta), { tentativas: 3, requestId, etapa: 'enviarResposta' });
     logger.info('whatsapp/ok', 'Resposta enviada', { requestId, telefone, chars: resposta.length });
 
     await Promise.all([salvarMensagem(telefone, 'user', conteudo), salvarMensagem(telefone, 'assistant', resposta)]);
 
   } catch (err) {
     logger.error('webhook/erro-geral', err.message, { requestId, telefone, stack: err.stack });
-    try { await enviarTexto(telefone, 'Opa, tive um problema técnico aqui 😅 Tenta de novo em instantes!'); } catch {}
+    try { await enviarTexto(jid, 'Opa, tive um problema técnico aqui 😅 Tenta de novo em instantes!'); } catch {}
   }
 });
 
