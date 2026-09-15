@@ -34,6 +34,34 @@ function jaProcessada(msgId) {
   return false;
 }
 
+// ─── ALLOWLIST DE TELEFONES ───────────────────────────────────────────────────
+// TELEFONES_PERMITIDOS vazio = atende todo mundo (produção normal).
+// Com números listados, só esses são atendidos — os demais são ignorados em
+// silêncio (sem "digitando", sem chamada à OpenAI, sem gravar nada). Serve para
+// usar um chip que também recebe leads/contatos que NÃO devem falar com o bot.
+const PERMITIDOS = String(process.env.TELEFONES_PERMITIDOS || '')
+  .split(',').map(s => s.trim()).filter(Boolean);
+
+// Gera as formas equivalentes de um número BR (com e sem o 9º dígito), porque o
+// JID do WhatsApp pode vir no formato antigo (5544 9877-146x) ou novo.
+function variantesTelefone(num) {
+  const d = String(num || '').replace(/\D/g, '');
+  const vs = new Set([d]);
+  const m = d.match(/^55(\d{2})(\d{8,9})$/);
+  if (m) {
+    const [, ddd, resto] = m;
+    if (resto.length === 9 && resto[0] === '9') vs.add(`55${ddd}${resto.slice(1)}`);
+    if (resto.length === 8) vs.add(`55${ddd}9${resto}`);
+  }
+  return vs;
+}
+
+function telefonePermitido(telefone) {
+  if (!PERMITIDOS.length) return true;
+  const vs = variantesTelefone(telefone);
+  return PERMITIDOS.some(p => [...variantesTelefone(p)].some(v => vs.has(v)));
+}
+
 // Confirmações que disparam a criação do pedido
 const CONFIRMACOES = new Set([
   'sim', 'simm', 'sim!', 's', '1', 'confirmar', 'confirma', 'confirmo',
@@ -72,6 +100,13 @@ app.post('/webhook', async (req, res) => {
     if (!msg) return;
   } catch (err) {
     logger.error('webhook/extrair', err.message, { requestId, err });
+    return;
+  }
+
+  if (!telefonePermitido(msg.telefone)) {
+    logger.info('webhook/bloqueado', 'Telefone fora da allowlist — ignorado', {
+      requestId, telefone: msg.telefone, pushName: msg.pushName,
+    });
     return;
   }
 
