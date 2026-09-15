@@ -79,10 +79,10 @@ const TOOL_STATUS = {
   type: 'function',
   function: {
     name: 'atualizar_status_pedido',
-    description: 'Atualiza o status do pedido. Use "aguardando_preparo" após confirmar comprovante PIX.',
+    description: 'Atualiza o status do pedido. Use "preparando" após confirmar comprovante PIX.',
     parameters: {
       type: 'object',
-      properties: { novo_status: { type: 'string', enum: ['aguardando_preparo', 'cancelado'] } },
+      properties: { novo_status: { type: 'string', enum: ['preparando', 'cancelado'] } },
       required: ['novo_status'],
     },
   },

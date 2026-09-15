@@ -99,6 +99,17 @@ DO $$ BEGIN ALTER TABLE public.cupons ADD CONSTRAINT cupons_cliente_id_fkey FORE
 DO $$ BEGIN ALTER TABLE public.cupons ADD CONSTRAINT cupons_pedido_id_fkey FOREIGN KEY (pedido_id) REFERENCES public.pedidos(id) NOT VALID; EXCEPTION WHEN duplicate_object THEN NULL; END $$;
 DO $$ BEGIN ALTER TABLE public.pedidos ADD CONSTRAINT fk_pedido_cupom FOREIGN KEY (cupom_id) REFERENCES public.cupons(id) NOT VALID; EXCEPTION WHEN duplicate_object THEN NULL; END $$;
 
+-- ⚠️ Se a tabela pedidos JÁ EXISTIA (de outro restaurante neste mesmo projeto),
+-- o CREATE TABLE IF NOT EXISTS acima não fez nada e a CHECK antiga continuou
+-- valendo — foi o que aconteceu no Choppatinhas: o banco recusava 'pronto' e
+-- 'aguardando_preparo', e o painel não avançava o pedido. Este bloco força a
+-- constraint a bater com os status que o agente e o painel usam.
+ALTER TABLE public.pedidos DROP CONSTRAINT IF EXISTS pedidos_status_check;
+ALTER TABLE public.pedidos ADD CONSTRAINT pedidos_status_check CHECK (status = ANY (ARRAY[
+  'pendente','Pendente','confirmado','Confirmado','preparando','Preparando','aguardando_preparo',
+  'saiu_entrega','Saiu_entrega','saiu entrega','Saiu Entrega','entregue','Entregue',
+  'cancelado','Cancelado','pronto','Pronto']));
+
 -- ─── itens_pedido ────────────────────────────────────────────
 CREATE TABLE IF NOT EXISTS public.itens_pedido (
   id uuid NOT NULL DEFAULT gen_random_uuid(),

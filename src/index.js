@@ -169,7 +169,7 @@ app.post('/webhook', async (req, res) => {
       logger.step(requestId, telefone, 'pix/comprovante-recebido');
       await enviarDigitando(jid, 1200);
       try {
-        const pedido = await comRetry(() => atualizarStatusPedido(telefone, 'aguardando_preparo'),
+        const pedido = await comRetry(() => atualizarStatusPedido(telefone, 'preparando'),
           { tentativas: 3, requestId, etapa: 'statusPreparo' });
         await limparRascunho(telefone);
         const txt = `✅ Comprovante recebido, pagamento confirmado! Pedido *#${pedido.numero_pedido}* já tá indo pra cozinha 🍲\n\n⏱️ Logo logo fica pronto. Valeu, ${pushName}! 🍻`;
