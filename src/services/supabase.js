@@ -180,6 +180,86 @@ async function getTaxaEntrega() {
   return Number.isFinite(t) ? t : 5;
 }
 
+// ─── ORIGEM / ATRIBUIÇÃO ──────────────────────────────────────────────────────
+
+const JANELA_ANUNCIO_HORAS = 24;   // clique no anúncio ainda "vale" pelo pedido de hoje
+const JANELA_RECOMPRA_DIAS = 7;    // oferta do agente ainda em pé quando o cliente volta
+
+// Cria/atualiza o cliente já na PRIMEIRA mensagem vinda de anúncio, antes de
+// existir pedido. Sem isso só dá pra contar quem comprou, e o funil perde a
+// conta de quantos leads o anúncio trouxe e não converteram.
+async function registrarOrigemAnuncio(telefone, pushName, anuncio) {
+  const tel = String(telefone).replace(/\D/g, '');
+  const patch = {
+    veio_de_anuncio: true,
+    anuncio_meta: anuncio,
+    demonstrou_interesse_em: new Date().toISOString(),
+  };
+
+  const { data: ex } = await sb.from('clientes').select('id').eq('telefone', tel).maybeSingle();
+  if (ex) {
+    const { error } = await sb.from('clientes').update(patch).eq('id', ex.id);
+    if (error) throw new Error(`Supabase/registrarOrigemAnuncio(update): ${error.message}`);
+    return ex.id;
+  }
+
+  const { data, error } = await sb.from('clientes')
+    .insert({ nome: pushName || 'Lead', telefone: tel, ...patch })
+    .select('id').single();
+  if (error) throw new Error(`Supabase/registrarOrigemAnuncio(insert): ${error.message}`);
+  return data.id;
+}
+
+// De onde veio ESTE pedido. A ordem importa: uma oferta de recompra em aberto
+// ganha do anúncio, senão a reativação seria creditada à mídia paga.
+async function determinarCanal(clienteId) {
+  if (!clienteId) return 'whatsapp_organico';
+
+  const desde = new Date(Date.now() - JANELA_RECOMPRA_DIAS * 86400000).toISOString();
+  const { data: ofertas } = await sb
+    .from('ofertas_enviadas')
+    .select('id')
+    .eq('cliente_id', clienteId)
+    .eq('converteu', false)
+    .gte('enviado_em', desde)
+    .limit(1);
+  if (ofertas?.length) return 'recompra';
+
+  const { data: cli } = await sb
+    .from('clientes')
+    .select('veio_de_anuncio, anuncio_meta, total_pedidos')
+    .eq('id', clienteId)
+    .maybeSingle();
+  if (!cli) return 'whatsapp_organico';
+
+  const recebidoEm = cli.anuncio_meta?.recebido_em;
+  const cliqueRecente = recebidoEm &&
+    (Date.now() - new Date(recebidoEm).getTime()) < JANELA_ANUNCIO_HORAS * 3600000;
+
+  // Também conta o lead que demorou dias pra fechar a primeira compra.
+  if (cliqueRecente || (cli.veio_de_anuncio && !cli.total_pedidos)) return 'whatsapp_anuncio';
+
+  return 'whatsapp_organico';
+}
+
+// Fecha o ciclo da campanha: sem isso o agente de recompra nunca mostra ROI.
+async function marcarOfertaConvertida(clienteId, pedidoId) {
+  const desde = new Date(Date.now() - JANELA_RECOMPRA_DIAS * 86400000).toISOString();
+  const { data: oferta } = await sb
+    .from('ofertas_enviadas')
+    .select('id')
+    .eq('cliente_id', clienteId)
+    .eq('converteu', false)
+    .gte('enviado_em', desde)
+    .order('enviado_em', { ascending: false })
+    .limit(1)
+    .maybeSingle();
+  if (!oferta) return;
+  await sb.from('ofertas_enviadas')
+    .update({ converteu: true, pedido_convertido_id: pedidoId })
+    .eq('id', oferta.id);
+}
+
 // ─── CLIENTES ─────────────────────────────────────────────────────────────────
 
 async function buscarOuCriarCliente(nome, telefone, endereco) {
@@ -236,6 +316,7 @@ async function criarPedidoCompleto({ nomeCliente, telefone, tipoEntrega, enderec
   const total = parseFloat((subtotal + taxaEntrega).toFixed(2));
 
   const cliente = await buscarOuCriarCliente(nomeCliente, tel, endereco);
+  const canal = await determinarCanal(cliente.id);
 
   const { data: pedido, error: pErr } = await sb
     .from('pedidos')
@@ -249,10 +330,13 @@ async function criarPedidoCompleto({ nomeCliente, telefone, tipoEntrega, enderec
       taxa_entrega: taxaEntrega,
       total,
       observacao: null,
+      canal,
     })
     .select('id, numero_pedido, total')
     .single();
   if (pErr) throw new Error(`Supabase/criarPedido: ${pErr.message}`);
+
+  if (canal === 'recompra') await marcarOfertaConvertida(cliente.id, pedido.id);
 
   const rows = listaItens.map(i => ({
     pedido_id: pedido.id,
@@ -299,4 +383,5 @@ module.exports = {
   carregarRascunho, salvarRascunho, atualizarRascunho, limparRascunho,
   buscarProdutos, validarItens, buscarMistura, buscarInfo, getTaxaEntrega,
   buscarOuCriarCliente, criarPedidoCompleto, atualizarStatusPedido,
+  registrarOrigemAnuncio, determinarCanal, marcarOfertaConvertida,
 };

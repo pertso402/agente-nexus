@@ -17,6 +17,29 @@ function cliente() {
 // e o Node rejeita path com caractere não escapado (ERR_UNESCAPED_CHARACTERS).
 const INSTANCE = () => encodeURIComponent(process.env.EVOLUTION_INSTANCE || '');
 
+// ─── ORIGEM DE ANÚNCIO (Click to WhatsApp do Meta) ───────────────────────────
+// Quem clica num anúncio do Instagram/Facebook chega com um "externalAdReply"
+// junto da primeira mensagem. Ele aparece em dois lugares dependendo do tipo:
+// na raiz do payload (mensagem de texto) ou dentro de message.<tipo>.contextInfo.
+// Guardamos só os identificadores — o payload traz uma thumbnail base64 de ~8KB
+// que não pode ir para o banco.
+function extrairAnuncio(data) {
+  const candidatos = [data.contextInfo, ...Object.values(data.message || {}).map(v => v && v.contextInfo)];
+  const ctx = candidatos.find(c => c && c.externalAdReply);
+  if (!ctx) return null;
+
+  const ad = ctx.externalAdReply;
+  return {
+    ctwa_clid:   ad.ctwaClid || null,   // id único do clique — a chave da atribuição
+    anuncio_id:  ad.sourceId || null,
+    plataforma:  ad.sourceApp || ctx.entryPointConversionApp || null,  // instagram | facebook
+    tipo:        ad.sourceType || null,
+    url:         ad.sourceUrl || null,
+    titulo:      ad.title || null,
+    recebido_em: new Date().toISOString(),
+  };
+}
+
 // ─── EXTRAIR CAMPOS DO PAYLOAD EVOLUTION API v2 ───────────────────────────────
 
 function extrairMensagem(body) {
@@ -62,7 +85,7 @@ function extrairMensagem(body) {
   const mimetype = data.mimetype || message.mimetype ||
     message.audioMessage?.mimetype || message.imageMessage?.mimetype || null;
 
-  return { telefone, jid, pushName, tipo, texto, mensagemRaw: message, base64, mimetype };
+  return { telefone, jid, pushName, tipo, texto, mensagemRaw: message, base64, mimetype, anuncio: extrairAnuncio(data) };
 }
 
 // ─── DOWNLOAD DE MÍDIA ────────────────────────────────────────────────────────
@@ -99,4 +122,4 @@ async function enviarDigitando(telefone, duracaoMs = 2000) {
   }
 }
 
-module.exports = { extrairMensagem, downloadMidia, enviarTexto, enviarDigitando };
+module.exports = { extrairMensagem, extrairAnuncio, downloadMidia, enviarTexto, enviarDigitando };

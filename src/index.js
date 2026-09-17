@@ -10,7 +10,7 @@ const { transcreverAudio, analisarImagem } = require('./services/media');
 const {
   carregarHistorico, salvarMensagem,
   carregarRascunho, limparRascunho,
-  buscarInfo, atualizarStatusPedido,
+  buscarInfo, atualizarStatusPedido, registrarOrigemAnuncio,
 } = require('./services/supabase');
 const { rodarAgente, confirmarPedido } = require('./agent');
 const { comRetry } = require('./utils/retry');
@@ -117,10 +117,23 @@ app.post('/webhook', async (req, res) => {
   }
 
   // telefone = identidade no banco | jid = endereço de resposta no WhatsApp (pode ser @lid)
-  const { telefone, jid, pushName, tipo, mensagemRaw, base64: base64Inline, mimetype: mimetypeInline } = msg;
+  const { telefone, jid, pushName, tipo, anuncio, mensagemRaw, base64: base64Inline, mimetype: mimetypeInline } = msg;
   let conteudo = msg.texto;
 
   logger.step(requestId, telefone, 'webhook/recebido', { tipo, pushName, preview: (conteudo || '').slice(0, 60) });
+
+  // Veio de anúncio: marca a origem já na primeira mensagem, antes de existir
+  // pedido. Não pode derrubar o atendimento se falhar.
+  if (anuncio) {
+    try {
+      await registrarOrigemAnuncio(telefone, pushName, anuncio);
+      logger.info('origem/anuncio', 'Lead de anúncio registrado', {
+        requestId, telefone, plataforma: anuncio.plataforma, anuncio_id: anuncio.anuncio_id,
+      });
+    } catch (err) {
+      logger.error('origem/anuncio/erro', err.message, { requestId, telefone, stack: err.stack });
+    }
+  }
 
   try {
     // ── Mídia: áudio ───────────────────────────────────────────────────────
