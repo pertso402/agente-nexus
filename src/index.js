@@ -11,6 +11,7 @@ const {
   carregarHistorico, salvarMensagem,
   carregarRascunho, limparRascunho,
   buscarInfo, atualizarStatusPedido, registrarOrigemAnuncio,
+  mensagemJaRegistrada,
 } = require('./services/supabase');
 const { rodarAgente, confirmarPedido } = require('./agent');
 const { comRetry } = require('./utils/retry');
@@ -116,6 +117,25 @@ app.post('/webhook', async (req, res) => {
     return;
   }
 
+  // ── Mensagem com fromMe: ou é o eco do que o agente mandou (já gravado), ou
+  // é um humano respondendo pelo celular. O humano precisa ficar no histórico:
+  // é onde o agente não deu conta, que é justamente o que se quer melhorar.
+  if (msg.fromMe) {
+    try {
+      if (await mensagemJaRegistrada(msg.msgId)) return;       // foi o próprio agente
+      if (!msg.texto?.trim()) return;
+      await salvarMensagem(msg.telefone, 'assistant', msg.texto, {
+        origem: 'humano', tipo: 'texto', msgId: msg.msgId, requestId,
+      });
+      logger.info('historico/humano', 'Resposta humana registrada', {
+        requestId, telefone: msg.telefone, preview: msg.texto.slice(0, 60),
+      });
+    } catch (err) {
+      logger.error('historico/humano/erro', err.message, { requestId, stack: err.stack });
+    }
+    return;   // humano assumiu: o agente não responde por cima
+  }
+
   // telefone = identidade no banco | jid = endereço de resposta no WhatsApp (pode ser @lid)
   const { telefone, jid, pushName, tipo, anuncio, mensagemRaw, base64: base64Inline, mimetype: mimetypeInline } = msg;
   let conteudo = msg.texto;
@@ -135,6 +155,16 @@ app.post('/webhook', async (req, res) => {
     }
   }
 
+  // O que será gravado junto da mensagem do cliente. Guardar a transcrição e a
+  // leitura da imagem separadas do texto permite auditar depois se o erro foi
+  // do Whisper/Vision ou do agente.
+  let transcricaoAudio = null, analiseImg = null;
+  const metaEntrada = () => ({
+    origem: 'cliente',
+    tipo: tipo === 'audioMessage' ? 'audio' : tipo === 'imageMessage' ? 'imagem' : 'texto',
+    msgId, requestId, transcricao: transcricaoAudio, analiseImagem: analiseImg,
+  });
+
   try {
     // ── Mídia: áudio ───────────────────────────────────────────────────────
     if (tipo === 'audioMessage') {
@@ -145,6 +175,7 @@ app.post('/webhook', async (req, res) => {
         b64 = m.base64; mime = m.mimetype || 'audio/ogg';
       }
       const transcricao = await comRetry(() => transcreverAudio(b64, mime), { tentativas: 2, requestId, etapa: 'whisper' });
+      transcricaoAudio = transcricao;
       conteudo = `🎙️ [Áudio]: ${transcricao}`;
       logger.info('midia/audio/ok', 'Transcrito', { requestId, telefone, chars: transcricao.length });
     }
@@ -160,6 +191,7 @@ app.post('/webhook', async (req, res) => {
       }
       const r = await comRetry(() => analisarImagem(b64, mime), { tentativas: 2, requestId, etapa: 'gptVision' });
       isComprovante = r.isComprovante;
+      analiseImg = r.analise;
       conteudo = isComprovante
         ? `📎 COMPROVANTE PIX CONFIRMADO: ${r.analise}${conteudo ? ' — Legenda: ' + conteudo : ''}`
         : `📎 [Imagem]: ${r.analise}${conteudo ? ' — Legenda: ' + conteudo : ''}`;
@@ -187,7 +219,10 @@ app.post('/webhook', async (req, res) => {
         await limparRascunho(telefone);
         const txt = `✅ Comprovante recebido, pagamento confirmado! Pedido *#${pedido.numero_pedido}* já tá indo pra cozinha 🍲\n\n⏱️ Logo logo fica pronto. Valeu, ${pushName}! 🍻`;
         await comRetry(() => enviarTexto(jid, txt), { tentativas: 3, requestId, etapa: 'enviarPixOk' });
-        await Promise.all([salvarMensagem(telefone, 'user', conteudo), salvarMensagem(telefone, 'assistant', txt)]);
+        await Promise.all([
+          salvarMensagem(telefone, 'user', conteudo, metaEntrada()),
+          salvarMensagem(telefone, 'assistant', txt, { origem: 'agente', tipo: 'texto', requestId, etapa: rascunho?.etapa_atual }),
+        ]);
         return;
       } catch (err) {
         logger.error('pix/comprovante/erro', err.message, { requestId, telefone, stack: err.stack });
@@ -220,7 +255,10 @@ app.post('/webhook', async (req, res) => {
         }
 
         await comRetry(() => enviarTexto(jid, txt), { tentativas: 3, requestId, etapa: 'enviarConfirmacao' });
-        await Promise.all([salvarMensagem(telefone, 'user', conteudo), salvarMensagem(telefone, 'assistant', txt)]);
+        await Promise.all([
+          salvarMensagem(telefone, 'user', conteudo, metaEntrada()),
+          salvarMensagem(telefone, 'assistant', txt, { origem: 'agente', tipo: 'texto', requestId, etapa: rascunho?.etapa_atual }),
+        ]);
         return;
       } catch (err) {
         logger.error('pedido/confirmar/erro', err.message, { requestId, telefone, faltando: err.faltando, stack: err.stack });
@@ -228,7 +266,10 @@ app.post('/webhook', async (req, res) => {
           ? `Ainda preciso de: ${err.faltando.join(', ')}. Vamos completar?`
           : 'Tive um probleminha pra fechar o pedido. Pode me confirmar os dados de novo?';
         await enviarTexto(jid, `Opa! ${falta}`);
-        await Promise.all([salvarMensagem(telefone, 'user', conteudo), salvarMensagem(telefone, 'assistant', falta)]);
+        await Promise.all([
+          salvarMensagem(telefone, 'user', conteudo, metaEntrada()),
+          salvarMensagem(telefone, 'assistant', falta, { origem: 'agente', tipo: 'texto', requestId, erro: err.message }),
+        ]);
         return;
       }
     }
@@ -236,21 +277,35 @@ app.post('/webhook', async (req, res) => {
     // ── FLUXO 3: agente conversacional ───────────────────────────────────────
     await enviarDigitando(jid, 2500);
     const msgParaAgente = `[Cliente: ${pushName} | WhatsApp: ${telefone}]\n${conteudo}`;
-    const resposta = await rodarAgente(msgParaAgente, historico, rascunho, requestId, telefone);
+    const r = await rodarAgente(msgParaAgente, historico, rascunho, requestId, telefone);
 
-    if (!resposta) {
+    if (!r.texto) {
       logger.warn('agente/vazio', 'Agente retornou vazio', { requestId, telefone });
       await enviarTexto(jid, 'Desculpa, não entendi bem 😅 Pode repetir?');
+      await salvarMensagem(telefone, 'user', conteudo, { ...metaEntrada(), erro: 'agente retornou vazio' });
       return;
     }
 
-    await comRetry(() => enviarTexto(jid, resposta), { tentativas: 3, requestId, etapa: 'enviarResposta' });
-    logger.info('whatsapp/ok', 'Resposta enviada', { requestId, telefone, chars: resposta.length });
+    const idEnviado = await comRetry(() => enviarTexto(jid, r.texto), { tentativas: 3, requestId, etapa: 'enviarResposta' });
+    logger.info('whatsapp/ok', 'Resposta enviada', { requestId, telefone, chars: r.texto.length });
 
-    await Promise.all([salvarMensagem(telefone, 'user', conteudo), salvarMensagem(telefone, 'assistant', resposta)]);
+    await Promise.all([
+      salvarMensagem(telefone, 'user', conteudo, metaEntrada()),
+      salvarMensagem(telefone, 'assistant', r.texto, {
+        origem: 'agente', tipo: 'texto', msgId: idEnviado, requestId,
+        toolCalls: r.toolCalls, modelo: r.modelo, latenciaMs: r.latenciaMs,
+        tokensEntrada: r.tokensEntrada, tokensSaida: r.tokensSaida,
+        etapa: rascunho?.etapa_atual || 'inicio',
+      }),
+    ]);
 
   } catch (err) {
     logger.error('webhook/erro-geral', err.message, { requestId, telefone, stack: err.stack });
+    // grava a mensagem do cliente mesmo quando o atendimento falha — senão a
+    // conversa que mais interessa analisar é justamente a que some do histórico
+    try {
+      await salvarMensagem(telefone, 'user', conteudo || '(sem texto)', { ...metaEntrada(), erro: err.message });
+    } catch {}
     try { await enviarTexto(jid, 'Opa, tive um problema técnico aqui 😅 Tenta de novo em instantes!'); } catch {}
   }
 });

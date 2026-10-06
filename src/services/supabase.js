@@ -3,6 +3,7 @@
 const { createClient } = require('@supabase/supabase-js');
 const ws = require('ws');
 const { normalizar, parseItens, avaliarRascunho, calcularSubtotal } = require('../utils/pedido');
+const logger = require('../logger');
 
 const sb = createClient(
   process.env.SUPA_URL,
@@ -30,12 +31,62 @@ async function carregarHistorico(telefone, limite = 16) {
     .filter(m => m && m.role && m.content);
 }
 
-async function salvarMensagem(telefone, role, content) {
+// "message" segue no formato antigo ({role, content}) porque é dele que a
+// memória do agente é montada. Os campos novos vão em colunas próprias e
+// existem só para analisar e otimizar depois.
+async function salvarMensagem(telefone, role, content, extras = {}) {
   const { error } = await sb.from('n8n_chat_histories').insert({
     session_id: telefone,
+    telefone,
     message: JSON.stringify({ role, content, ts: Date.now() }),
+    origem:              extras.origem || (role === 'user' ? 'cliente' : 'agente'),
+    tipo:                extras.tipo || 'texto',
+    whatsapp_message_id: extras.msgId || null,
+    transcricao:         extras.transcricao || null,
+    analise_imagem:      extras.analiseImagem || null,
+    tool_calls:          extras.toolCalls || null,
+    etapa_pedido:        extras.etapa || null,
+    modelo:              extras.modelo || null,
+    latencia_ms:         extras.latenciaMs || null,
+    tokens_entrada:      extras.tokensEntrada || null,
+    tokens_saida:        extras.tokensSaida || null,
+    erro:                extras.erro || null,
+    request_id:          extras.requestId || null,
   });
-  if (error) throw new Error(`Supabase/salvarMensagem: ${error.message}`);
+
+  if (!error) return true;
+
+  // Se as colunas novas ainda não existem (migration não rodada), grava ao menos
+  // a conversa no formato antigo. Sem isso o histórico fica vazio e o agente
+  // perde a MEMÓRIA — cada mensagem recomeçaria do zero.
+  if (/column|schema cache/i.test(error.message || '')) {
+    const { error: e2 } = await sb.from('n8n_chat_histories').insert({
+      session_id: telefone,
+      message: JSON.stringify({ role, content, ts: Date.now() }),
+    });
+    if (!e2) {
+      logger.warn('historico/sem-colunas', 'Gravado sem metadados — rode historico.sql', { telefone });
+      return true;
+    }
+  }
+
+  // Falha de histórico NÃO derruba o atendimento: a resposta já foi enviada ao
+  // cliente, e lançar aqui faria ele receber um "problema técnico" logo depois
+  // de uma resposta correta. Fica registrado em agent_logs para não passar batido.
+  logger.error('historico/falha-ao-gravar', error.message, { telefone, origem: extras.origem, role });
+  return false;
+}
+
+// O webhook ecoa também o que o próprio agente mandou. Se o id já está gravado,
+// aquele "fromMe" é do agente; se não está, foi um humano digitando no celular.
+async function mensagemJaRegistrada(msgId) {
+  if (!msgId) return false;
+  const { data } = await sb
+    .from('n8n_chat_histories')
+    .select('id')
+    .eq('whatsapp_message_id', msgId)
+    .limit(1);
+  return !!data?.length;
 }
 
 // ─── RASCUNHO DO PEDIDO ───────────────────────────────────────────────────────
@@ -180,6 +231,35 @@ async function getTaxaEntrega() {
   return Number.isFinite(t) ? t : 5;
 }
 
+// ─── IDENTIDADE DO CLIENTE ────────────────────────────────────────────────────
+// O cardápio grava o número com o 9 (5544999877146) e o WhatsApp entrega o JID
+// no formato antigo (554499877146). São a MESMA pessoa: sem unificar, ela vira
+// dois cadastros com 1 pedido cada — e aí a taxa de recompra dá 0%, o LTV sai
+// pela metade e o CAC conta duas aquisições.
+function variantesTelefone(num) {
+  const d = String(num || '').replace(/\D/g, '');
+  const vs = new Set([d]);
+  const m = d.match(/^55(\d{2})(\d{8,9})$/);
+  if (m) {
+    const [, ddd, resto] = m;
+    if (resto.length === 9 && resto[0] === '9') vs.add(`55${ddd}${resto.slice(1)}`);
+    if (resto.length === 8) vs.add(`55${ddd}9${resto}`);
+  }
+  return [...vs];
+}
+
+// Procura o cliente por qualquer uma das formas do número.
+async function acharClientePorTelefone(telefone) {
+  const vs = variantesTelefone(telefone);
+  const { data } = await sb
+    .from('clientes')
+    .select('id, total_pedidos, total_gasto, primeiro_pedido, telefone')
+    .in('telefone', vs)
+    .order('total_pedidos', { ascending: false })   // na dúvida, fica com o que tem histórico
+    .limit(1);
+  return data?.[0] || null;
+}
+
 // ─── ORIGEM / ATRIBUIÇÃO ──────────────────────────────────────────────────────
 
 const JANELA_ANUNCIO_HORAS = 24;   // clique no anúncio ainda "vale" pelo pedido de hoje
@@ -196,7 +276,7 @@ async function registrarOrigemAnuncio(telefone, pushName, anuncio) {
     demonstrou_interesse_em: new Date().toISOString(),
   };
 
-  const { data: ex } = await sb.from('clientes').select('id').eq('telefone', tel).maybeSingle();
+  const ex = await acharClientePorTelefone(tel);
   if (ex) {
     const { error } = await sb.from('clientes').update(patch).eq('id', ex.id);
     if (error) throw new Error(`Supabase/registrarOrigemAnuncio(update): ${error.message}`);
@@ -265,11 +345,9 @@ async function marcarOfertaConvertida(clienteId, pedidoId) {
 async function buscarOuCriarCliente(nome, telefone, endereco) {
   const tel = String(telefone).replace(/\D/g, '');
 
-  const { data: ex } = await sb
-    .from('clientes')
-    .select('id, total_pedidos, total_gasto, primeiro_pedido')
-    .eq('telefone', tel)
-    .maybeSingle();
+  // Busca por todas as formas do número (com e sem o 9), senão o mesmo cliente
+  // vindo do cardápio e do WhatsApp vira dois cadastros.
+  const ex = await acharClientePorTelefone(tel);
 
   if (ex) {
     // Atualiza nome/endereço se vieram (cliente pode ter mudado)
@@ -382,6 +460,6 @@ module.exports = {
   carregarHistorico, salvarMensagem,
   carregarRascunho, salvarRascunho, atualizarRascunho, limparRascunho,
   buscarProdutos, validarItens, buscarMistura, buscarInfo, getTaxaEntrega,
-  buscarOuCriarCliente, criarPedidoCompleto, atualizarStatusPedido,
+  buscarOuCriarCliente, criarPedidoCompleto, atualizarStatusPedido, mensagemJaRegistrada,
   registrarOrigemAnuncio, determinarCanal, marcarOfertaConvertida,
 };

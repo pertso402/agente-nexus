@@ -48,7 +48,10 @@ function extrairMensagem(body) {
   const message = data.message || {};
   const messageType = data.messageType || Object.keys(message)[0] || 'conversation';
 
-  if (key.fromMe === true) return null;                        // mensagem própria
+  // fromMe não é mais descartado aqui: pode ser o agente (ecoando o que enviou)
+  // ou um humano digitando no celular. Quem decide é o index.js — descartar
+  // neste ponto fazia a mensagem do humano nunca chegar ao banco.
+  const fromMe = key.fromMe === true;
   const remoteJid = key.remoteJid || '';
   if (remoteJid.includes('@g.us')) return null;                // grupo
 
@@ -85,7 +88,8 @@ function extrairMensagem(body) {
   const mimetype = data.mimetype || message.mimetype ||
     message.audioMessage?.mimetype || message.imageMessage?.mimetype || null;
 
-  return { telefone, jid, pushName, tipo, texto, mensagemRaw: message, base64, mimetype, anuncio: extrairAnuncio(data) };
+  return { telefone, jid, pushName, tipo, texto, fromMe, msgId: key.id || null,
+           mensagemRaw: message, base64, mimetype, anuncio: extrairAnuncio(data) };
 }
 
 // ─── DOWNLOAD DE MÍDIA ────────────────────────────────────────────────────────
@@ -102,12 +106,15 @@ async function downloadMidia(mensagemRaw) {
 
 // ─── ENVIO DE MENSAGENS ───────────────────────────────────────────────────────
 
+// Devolve o id da mensagem no WhatsApp: é por ele que o webhook reconhece
+// depois que aquele "fromMe" foi o agente, e não um humano digitando.
 async function enviarTexto(telefone, texto) {
-  await cliente().post(`/message/sendText/${INSTANCE()}`, {
+  const { data } = await cliente().post(`/message/sendText/${INSTANCE()}`, {
     number: telefone,
     text: texto,
     delay: 800,
   });
+  return data?.key?.id || null;
 }
 
 async function enviarDigitando(telefone, duracaoMs = 2000) {

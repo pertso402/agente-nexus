@@ -116,6 +116,13 @@ _Responde *SIM* pra eu fechar o pedido, ou me diz se quer mudar algo._`;
 
 async function rodarAgente(mensagemUsuario, historico, rascunho, requestId, telefone) {
   const openai = getClient();
+  const t0 = Date.now();
+  const toolCalls = [];          // o que o agente chamou, pra analisar depois
+  let tokensEntrada = 0, tokensSaida = 0;
+  const somarTokens = r => {
+    tokensEntrada += r?.usage?.prompt_tokens || 0;
+    tokensSaida   += r?.usage?.completion_tokens || 0;
+  };
 
   const messages = [
     ...historico.map(h => ({ role: h.role, content: h.content })),
@@ -141,6 +148,7 @@ async function rodarAgente(mensagemUsuario, historico, rascunho, requestId, tele
     }),
     { tentativas: 3, requestId, etapa: 'openai/create' }
   );
+  somarTokens(resposta);
 
   let iteracoes = 0;
 
@@ -158,12 +166,15 @@ async function rodarAgente(mensagemUsuario, historico, rascunho, requestId, tele
       logger.step(requestId, telefone, `tool/${nomeTool}`, { args });
 
       let resultado;
+      const tTool = Date.now();
       try {
         resultado = await executarTool(nomeTool, args, { telefone });
         logger.info(`tool/${nomeTool}/ok`, 'Executada', { requestId, telefone });
+        toolCalls.push({ name: nomeTool, args, ms: Date.now() - tTool, ok: true });
       } catch (err) {
         resultado = `ERRO em ${nomeTool}: ${err.message}`;
         logger.error(`tool/${nomeTool}/erro`, err.message, { requestId, telefone, stack: err.stack });
+        toolCalls.push({ name: nomeTool, args, ms: Date.now() - tTool, ok: false, erro: err.message });
       }
 
       toolResults.push({ role: 'tool', tool_call_id: toolCall.id, content: String(resultado) });
@@ -182,6 +193,7 @@ async function rodarAgente(mensagemUsuario, historico, rascunho, requestId, tele
       }),
       { tentativas: 3, requestId, etapa: 'openai/create-loop' }
     );
+    somarTokens(resposta);
   }
 
   if (iteracoes >= MAX_ITER) {
@@ -189,13 +201,23 @@ async function rodarAgente(mensagemUsuario, historico, rascunho, requestId, tele
   }
 
   const textoFinal = resposta.choices[0].message?.content?.trim() || '';
+  const latenciaMs = Date.now() - t0;
   logger.step(requestId, telefone, 'agente/ok', {
     iteracoes,
     finish_reason: resposta.choices[0].finish_reason,
     resposta_len: textoFinal.length,
+    latencia_ms: latenciaMs,
+    tools: toolCalls.map(t => t.name),
   });
 
-  return textoFinal;
+  return {
+    texto: textoFinal,
+    toolCalls: toolCalls.length ? toolCalls : null,
+    modelo: MODEL,
+    latenciaMs,
+    tokensEntrada,
+    tokensSaida,
+  };
 }
 
 // ─── CONFIRMAR PEDIDO (acionado pelo SIM do cliente, no código) ──────────────
