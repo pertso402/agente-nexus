@@ -38,7 +38,9 @@ async function salvarMensagem(telefone, role, content, extras = {}) {
   const { error } = await sb.from('n8n_chat_histories').insert({
     session_id: telefone,
     telefone,
-    message: JSON.stringify({ role, content, ts: Date.now() }),
+    // objeto jsonb de verdade (antes ia JSON.stringify, o que guardava uma STRING
+    // dentro do jsonb e fazia message->>'content' devolver NULL nas consultas)
+    message: { role, content, ts: Date.now() },
     origem:              extras.origem || (role === 'user' ? 'cliente' : 'agente'),
     tipo:                extras.tipo || 'texto',
     whatsapp_message_id: extras.msgId || null,
