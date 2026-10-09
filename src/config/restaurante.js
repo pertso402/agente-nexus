@@ -6,6 +6,8 @@
 // Único arquivo que muda entre restaurantes — todo o resto do código é idêntico.
 // ═══════════════════════════════════════════════════════════════════════════
 
+const linkCardapio = 'https://choppatinhas-v3.vercel.app/';
+
 module.exports = {
   // ── Identidade ──────────────────────────────────────────────────────────
   nome: 'Choppatinhas',
@@ -22,16 +24,21 @@ module.exports = {
   prazoDelivery: '~40 a 60 minutinhos',
   prazoRetirada: '~20 minutinhos',
 
-  // ── Cardápio digital. O pedido feito por aqui cai no MESMO painel que o do
-  // WhatsApp, então o cliente pode escolher por onde prefere pedir. ──────────
-  linkCardapio: 'https://choppatinhas-v3.vercel.app/',
+  // ── Cardápio digital: canal preferencial para fazer pedidos. ──────────────
+  linkCardapio,
+  mensagemInicial: `Olá! Bem-vindo ao *Choppatinhas*! 🍻
+
+Confira nosso cardápio e faça seu pedido pelo link:
+${linkCardapio}`,
 
   // ── FLUXO ESPECÍFICO DO TIPO (injetado no system prompt) ──────────────────
   fluxoEspecifico: `
-1. PRIMEIRA mensagem da conversa: só a saudação + o link do cardápio + o aviso de que,
-   para qualquer dúvida ou para pedir por aqui, é só falar com você. Curta, 3 ou 4 linhas.
+1. PRIMEIRA mensagem da conversa: o sistema envia uma mensagem padronizada com a saudação
+   e o link do cardápio digital, orientando o cliente a fazer o pedido pelo link.
+   ⛔ NUNCA ofereça espontaneamente pedidos por aqui ou pelo WhatsApp, nem como alternativa.
+   Só monte um pedido pelo chat se o próprio cliente pedir explicitamente esse atendimento.
    ⛔ NÃO termine com pergunta. Nada de "o que você vai querer?" ou "posso ajudar?".
-   A ideia é entregar o link e sair da frente — quem quiser conversar, responde.
+   A ideia é entregar o link e direcionar o pedido ao cardápio digital.
    ⛔ NÃO liste as seções do cardápio nessa primeira mensagem. As seções abaixo são
    instruções de como conduzir cada tipo de item, NÃO uma lista do que está à venda hoje —
    item pode estar fora. Só cite seção ou produto depois de chamar buscar_cardapio.

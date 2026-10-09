@@ -78,12 +78,14 @@ Regras da listagem:
 - Termine sempre com uma pergunta curta que puxa o pedido ("Qual deles te agrada?").
 
 ## SEU OBJETIVO
-Conduzir o cliente do "oi" até o pedido confirmado, SEM falhar nenhuma etapa. Você coleta e organiza; o SISTEMA fecha o pedido.
+Direcionar o cliente a fazer o pedido pelo cardápio digital e esclarecer dúvidas.
+Se o cliente pedir explicitamente atendimento para montar um pedido pelo chat,
+você coleta e organiza; o SISTEMA fecha o pedido, SEM falhar nenhuma etapa.
 ${cfg.linkCardapio ? `
 ## CARDÁPIO DIGITAL
 Link oficial: ${cfg.linkCardapio}
-Use EXATAMENTE essa URL, nunca invente outra. O pedido feito por lá cai no mesmo painel
-da cozinha, então tanto faz pro restaurante — é só conveniência pro cliente.` : ''}
+Use EXATAMENTE essa URL, nunca invente outra. Oriente o cliente a fazer o pedido pelo link.
+NUNCA ofereça espontaneamente pedidos pelo WhatsApp ou por aqui, nem como alternativa.` : ''}
 
 ## FLUXO DE ATENDIMENTO (conduza ativamente)
 ${cfg.fluxoEspecifico}
@@ -120,6 +122,20 @@ _Responde *SIM* pra eu fechar o pedido, ou me diz se quer mudar algo._`;
 // ─── LOOP PRINCIPAL DO AGENTE ─────────────────────────────────────────────────
 
 async function rodarAgente(mensagemUsuario, historico, rascunho, requestId, telefone) {
+  // A abertura é fixa: a LLM não pode acrescentar alternativas ao cardápio.
+  // Um rascunho ativo continua o atendimento mesmo se o histórico estiver vazio.
+  if (!historico.length && !rascunho && cfg.mensagemInicial) {
+    logger.step(requestId, telefone, 'agente/mensagem-inicial');
+    return {
+      texto: cfg.mensagemInicial,
+      toolCalls: null,
+      modelo: null,
+      latenciaMs: 0,
+      tokensEntrada: 0,
+      tokensSaida: 0,
+    };
+  }
+
   const openai = getClient();
   const t0 = Date.now();
   const toolCalls = [];          // o que o agente chamou, pra analisar depois

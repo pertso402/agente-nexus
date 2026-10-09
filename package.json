@@ -4,6 +4,7 @@
   "description": "Agente de atendimento WhatsApp do Choppatinhas",
   "main": "src/index.js",
   "scripts": {
+    "test": "node --test",
     "start": "node src/index.js",
     "dev": "nodemon src/index.js"
   },
