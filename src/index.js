@@ -126,12 +126,42 @@ app.post('/webhook', async (req, res) => {
     try {
       if (await mensagemJaRegistrada(msg.msgId)) return;       // foi o próprio agente
       const tipoHumano = msg.tipo === 'audioMessage' ? 'audio' : msg.tipo === 'imageMessage' ? 'imagem' : 'texto';
-      const textoHumano = msg.texto?.trim() || (tipoHumano === 'audio'
+      let textoHumano = msg.texto?.trim() || (tipoHumano === 'audio'
         ? '[Áudio enviado pela atendente]'
         : tipoHumano === 'imagem' ? '[Imagem enviada pela atendente]' : '');
+      let transcricaoHumana = null, analiseImagemHumana = null;
+      if (tipoHumano === 'audio') {
+        try {
+          const midia = msg.base64
+            ? { base64: msg.base64, mimetype: msg.mimetype || 'audio/ogg' }
+            : await comRetry(() => downloadMidia(msg.mensagemRaw), { tentativas: 3, requestId, etapa: 'downloadAudioHumano' });
+          transcricaoHumana = await comRetry(
+            () => transcreverAudio(midia.base64, midia.mimetype || 'audio/ogg'),
+            { tentativas: 2, requestId, etapa: 'transcricaoAudioHumano' }
+          );
+          textoHumano = `🎙️ [Áudio da atendente]: ${transcricaoHumana}`;
+        } catch (err) {
+          logger.warn('historico/humano/audio', 'Mídia de áudio da atendente não pôde ser transcrita', { requestId, telefone: msg.telefone, erro: err.message });
+        }
+      } else if (tipoHumano === 'imagem') {
+        try {
+          const midia = msg.base64
+            ? { base64: msg.base64, mimetype: msg.mimetype || 'image/jpeg' }
+            : await comRetry(() => downloadMidia(msg.mensagemRaw), { tentativas: 3, requestId, etapa: 'downloadImagemHumana' });
+          const analise = await comRetry(
+            () => analisarImagem(midia.base64, midia.mimetype || 'image/jpeg'),
+            { tentativas: 2, requestId, etapa: 'analiseImagemHumana' }
+          );
+          analiseImagemHumana = analise.analise;
+          textoHumano = `${msg.texto?.trim() ? msg.texto.trim() + ' — ' : ''}📎 [Imagem da atendente]: ${analiseImagemHumana}`;
+        } catch (err) {
+          logger.warn('historico/humano/imagem', 'Mídia de imagem da atendente não pôde ser analisada', { requestId, telefone: msg.telefone, erro: err.message });
+        }
+      }
       if (!textoHumano) return;
       await salvarMensagem(msg.telefone, 'assistant', textoHumano, {
         origem: 'humano', tipo: tipoHumano, msgId: msg.msgId, requestId,
+        transcricao: transcricaoHumana, analiseImagem: analiseImagemHumana,
       });
       await pausarAtendimento(msg.telefone, 'humano: atendente respondeu na conversa');
       logger.info('historico/humano', 'Resposta humana registrada', {
