@@ -9,6 +9,7 @@ const { extrairMensagem, downloadMidia, enviarTexto, enviarDigitando } = require
 const { transcreverAudio, analisarImagem } = require('./services/media');
 const {
   carregarHistorico, salvarMensagem,
+  carregarPausaAtiva, pausarAtendimento,
   carregarRascunho, limparRascunho,
   buscarInfo, atualizarStatusPedido, registrarOrigemAnuncio,
   mensagemJaRegistrada,
@@ -124,10 +125,15 @@ app.post('/webhook', async (req, res) => {
   if (msg.fromMe) {
     try {
       if (await mensagemJaRegistrada(msg.msgId)) return;       // foi o próprio agente
-      if (!msg.texto?.trim()) return;
-      await salvarMensagem(msg.telefone, 'assistant', msg.texto, {
-        origem: 'humano', tipo: 'texto', msgId: msg.msgId, requestId,
+      const tipoHumano = msg.tipo === 'audioMessage' ? 'audio' : msg.tipo === 'imageMessage' ? 'imagem' : 'texto';
+      const textoHumano = msg.texto?.trim() || (tipoHumano === 'audio'
+        ? '[Áudio enviado pela atendente]'
+        : tipoHumano === 'imagem' ? '[Imagem enviada pela atendente]' : '');
+      if (!textoHumano) return;
+      await salvarMensagem(msg.telefone, 'assistant', textoHumano, {
+        origem: 'humano', tipo: tipoHumano, msgId: msg.msgId, requestId,
       });
+      await pausarAtendimento(msg.telefone, 'humano: atendente respondeu na conversa');
       logger.info('historico/humano', 'Resposta humana registrada', {
         requestId, telefone: msg.telefone, preview: msg.texto.slice(0, 60),
       });
@@ -200,6 +206,25 @@ app.post('/webhook', async (req, res) => {
     }
 
     if (!conteudo?.trim()) return;
+
+    // Durante a pausa, grava a mensagem do cliente e não responde por cima da
+    // atendente. Depois que a pausa expira, o próximo envio volta ao agente e
+    // o histórico já inclui tudo o que o cliente e a equipe disseram.
+    let pausaAtiva;
+    try {
+      pausaAtiva = await carregarPausaAtiva(telefone);
+    } catch (err) {
+      logger.error('atendimento/pausa/consulta', err.message, { requestId, telefone, stack: err.stack });
+      await salvarMensagem(telefone, 'user', conteudo, { ...metaEntrada(), erro: 'pausa consultada sem sucesso' });
+      return;
+    }
+    if (pausaAtiva) {
+      await salvarMensagem(telefone, 'user', conteudo, metaEntrada());
+      logger.info('atendimento/pausado', 'Mensagem registrada; agente aguardando atendente', {
+        requestId, telefone, pausado_ate: pausaAtiva.pausado_ate,
+      });
+      return;
+    }
 
     // ── Estado ──────────────────────────────────────────────────────────────
     const [historico, rascunho] = await Promise.all([
@@ -279,6 +304,23 @@ app.post('/webhook', async (req, res) => {
     await enviarDigitando(jid, 2500);
     const msgParaAgente = `[Cliente: ${pushName} | WhatsApp: ${telefone}]\n${conteudo}`;
     const r = await rodarAgente(msgParaAgente, historico, rascunho, requestId, telefone);
+
+    if (r.handoff) {
+      await pausarAtendimento(telefone, `handoff: ${r.handoff.motivo}`);
+      const idEnviado = await comRetry(() => enviarTexto(jid, r.texto), { tentativas: 3, requestId, etapa: 'enviarHandoff' });
+      await Promise.all([
+        salvarMensagem(telefone, 'user', conteudo, metaEntrada()),
+        salvarMensagem(telefone, 'assistant', r.texto, {
+          origem: 'agente', tipo: 'texto', msgId: idEnviado, requestId,
+          toolCalls: r.toolCalls, modelo: r.modelo, latenciaMs: r.latenciaMs,
+          tokensEntrada: r.tokensEntrada, tokensSaida: r.tokensSaida, etapa: 'atendimento/handoff',
+        }),
+      ]);
+      logger.info('atendimento/handoff', 'Atendente avisada no painel; agente pausado', {
+        requestId, telefone, motivo: r.handoff.motivo,
+      });
+      return;
+    }
 
     if (!r.texto) {
       logger.warn('agente/vazio', 'Agente retornou vazio', { requestId, telefone });
