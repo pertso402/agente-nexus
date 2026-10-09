@@ -113,6 +113,12 @@ async function enviarTexto(telefone, texto) {
     number: telefone,
     text: texto,
     delay: 800,
+    // Quem desenha o cartão do link (banner do cardápio na saudação) é o WhatsApp
+    // de quem recebe, lendo as meta tags og: da página — a Evolution 2.3.7 não
+    // embute miniatura na mensagem, testado. Mandamos o flag assim mesmo para não
+    // depender do padrão da instância e para já valer se a versão passar a gerar.
+    // Se o banner sumir, o problema está nas meta tags do cardápio, não aqui.
+    linkPreview: true,
   });
   return data?.key?.id || null;
 }
