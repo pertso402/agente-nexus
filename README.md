@@ -28,6 +28,18 @@ retroativo para pedidos antigos. O painel atual agrupa “Pronto / Saiu”: para
 delivery, esse movimento grava `saiu_entrega`; um aviso separado de “pronto” exige
 uma mudança real para o status `pronto`.
 
+## Passar a conversa para uma atendente
+
+Quando o agente não conseguir responder com segurança, receber uma reclamação
+que exija decisão humana ou o cliente pedir uma pessoa, ele registra uma pausa de
+10 minutos em `agente_pausas` e mostra um aviso persistente no painel de pedidos.
+Quando a atendente responder pelo WhatsApp conectado à Evolution, a resposta é
+gravada como fala humana e a pausa de 10 minutos recomeça. Durante a pausa, toda
+mensagem de texto do cliente é gravada, mas o bot não responde. Ao fim dos 10
+minutos, a próxima mensagem do cliente volta ao agente; o histórico usado pelo
+modelo inclui as mensagens mais recentes de ambos os lados. A duração pode ser
+ajustada com `PAUSA_ATENDENTE_MINUTOS`.
+
 Se a Evolution aceitar a mensagem e o processo cair antes de registrar o envio,
 uma retentativa pode repetir o aviso. A API de envio e o banco não compartilham
 uma transação. Erros e tentativas ficam em `notificacoes_pedido_enviadas`.

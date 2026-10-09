@@ -258,7 +258,7 @@ INSERT INTO public.info_restaurante (chave, valor, descricao) VALUES
 ('taxa_entrega',  '6',                       'Taxa de entrega em reais (ajuste se necessário)'),
 ('pedido_minimo', '20',                      'Pedido mínimo (informado no cardápio coletado)'),
 ('loja_aberta',   'true',                    'Status da loja'),
-('horario',       'Fecha às 22:30 (PENDENTE horário de abertura)', 'Horário de funcionamento'),
+('horario',       'Segunda a sexta: 17h30 às 23h; sábado: 11h às 23h', 'Horário de funcionamento'),
 ('endereco',      'PENDENTE-endereco',       'Endereço físico'),
 ('senha_admin',   '0402',                    'Senha do painel admin')
 ON CONFLICT (chave) DO UPDATE SET valor = EXCLUDED.valor;

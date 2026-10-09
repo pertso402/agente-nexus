@@ -119,6 +119,19 @@ const TOOL_STATUS = {
   },
 };
 
+const TOOL_ATENDENTE = {
+  type: 'function',
+  function: {
+    name: 'chamar_atendente',
+    description: 'Encaminha a conversa para uma atendente humana quando você não consegue resolver com segurança, quando o cliente pede uma pessoa ou quando há uma reclamação/problema que exige decisão humana. Informe um resumo curto do motivo. O sistema pausa o agente por 10 minutos e mostra o alerta no painel.',
+    parameters: {
+      type: 'object',
+      properties: { motivo: { type: 'string', description: 'Resumo objetivo para a atendente entender o que precisa resolver.' } },
+      required: ['motivo'],
+    },
+  },
+};
+
 // Monta a lista de tools conforme o tipo de restaurante
 const TOOLS = [
   TOOL_CARDAPIO,
@@ -126,6 +139,7 @@ const TOOLS = [
   TOOL_INFO,
   TOOL_SALVAR,
   TOOL_STATUS,
+  TOOL_ATENDENTE,
 ];
 
 // ─── EXECUTOR ─────────────────────────────────────────────────────────────────

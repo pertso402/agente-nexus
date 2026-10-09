@@ -18,12 +18,14 @@ async function carregarHistorico(telefone, limite = 16) {
     .from('n8n_chat_histories')
     .select('message')
     .eq('session_id', telefone)
-    .order('created_at', { ascending: true })
+    // Pega as mensagens mais novas; inverte para alimentar o modelo em ordem
+    // cronológica e preservar as falas registradas durante a pausa humana.
+    .order('created_at', { ascending: false })
     .limit(limite);
 
   if (error) throw new Error(`Supabase/carregarHistorico: ${error.message}`);
 
-  return (data || [])
+  return (data || []).reverse()
     .map(row => {
       try { return typeof row.message === 'string' ? JSON.parse(row.message) : row.message; }
       catch { return null; }
@@ -89,6 +91,34 @@ async function mensagemJaRegistrada(msgId) {
     .eq('whatsapp_message_id', msgId)
     .limit(1);
   return !!data?.length;
+}
+
+// A pausa é por número/conversa. Cada evento cria uma linha para manter o
+// histórico de escalonamentos e de respostas humanas visível no painel.
+const DURACAO_PAUSA_MINUTOS = Math.max(1, Number(process.env.PAUSA_ATENDENTE_MINUTOS) || 10);
+
+async function carregarPausaAtiva(telefone) {
+  const tel = String(telefone || '').replace(/\D/g, '');
+  const { data, error } = await sb.from('agente_pausas')
+    .select('motivo, pausado_ate, created_at')
+    .eq('telefone', tel)
+    .order('created_at', { ascending: false })
+    .limit(1)
+    .maybeSingle();
+  if (error) throw new Error(`Supabase/carregarPausaAtiva: ${error.message}`);
+  return data && Date.parse(data.pausado_ate) > Date.now() ? data : null;
+}
+
+async function pausarAtendimento(telefone, motivo, minutos = DURACAO_PAUSA_MINUTOS) {
+  const tel = String(telefone || '').replace(/\D/g, '');
+  if (!tel) throw new Error('Telefone ausente ao pausar atendimento.');
+  const pausadoAte = new Date(Date.now() + Math.max(1, Number(minutos) || DURACAO_PAUSA_MINUTOS) * 60_000).toISOString();
+  const { data, error } = await sb.from('agente_pausas')
+    .insert({ telefone: tel, motivo, pausado_ate: pausadoAte })
+    .select('id, telefone, motivo, pausado_ate, created_at')
+    .single();
+  if (error) throw new Error(`Supabase/pausarAtendimento: ${error.message}`);
+  return data;
 }
 
 // ─── RASCUNHO DO PEDIDO ───────────────────────────────────────────────────────
@@ -460,6 +490,7 @@ async function atualizarStatusPedido(telefone, novoStatus) {
 
 module.exports = {
   carregarHistorico, salvarMensagem,
+  carregarPausaAtiva, pausarAtendimento,
   carregarRascunho, salvarRascunho, atualizarRascunho, limparRascunho,
   buscarProdutos, validarItens, buscarMistura, buscarInfo, getTaxaEntrega,
   buscarOuCriarCliente, criarPedidoCompleto, atualizarStatusPedido, mensagemJaRegistrada,

@@ -92,6 +92,7 @@ ${cfg.fluxoEspecifico}
 
 Regras transversais do fluxo:
 - SEMPRE que coletar algo, chame salvar_dados_pedido (pode ser um campo só). O retorno te diz o que ainda falta.
+- Se não souber responder com segurança depois de consultar as ferramentas, se houver reclamação/problema que exija decisão humana ou se o cliente pedir uma atendente, chame chamar_atendente com um resumo objetivo. Não invente uma solução nem diga que já chamou antes de usar essa ferramenta.
 - Assim que o cliente escolher um item, salve e CONFIRME de volta o item e o preço que o sistema registrou (ex: "Anotei: 1× [item] — R$ X ✅ Mais alguma coisa?"). Só avance após esse eco — é o que evita registrar o item errado.
 - Personalizações do item (sabor, meio a meio, ponto da carne, "sem cebola", borda) vão no campo "observacao" daquele item.
 - Quando o retorno disser "PRONTO_PARA_CONFIRMACAO": apresente o RESUMO FINAL e peça *SIM*.
@@ -139,6 +140,7 @@ async function rodarAgente(mensagemUsuario, historico, rascunho, requestId, tele
   const openai = getClient();
   const t0 = Date.now();
   const toolCalls = [];          // o que o agente chamou, pra analisar depois
+  let handoff = null;
   let tokensEntrada = 0, tokensSaida = 0;
   const somarTokens = r => {
     tokensEntrada += r?.usage?.prompt_tokens || 0;
@@ -184,6 +186,14 @@ async function rodarAgente(mensagemUsuario, historico, rascunho, requestId, tele
       let args = {};
       try { args = JSON.parse(toolCall.function.arguments || '{}'); } catch {}
 
+      if (nomeTool === 'chamar_atendente') {
+        handoff = { motivo: String(args.motivo || 'O agente solicitou ajuda humana.').trim().slice(0, 500) };
+        toolCalls.push({ name: nomeTool, args: handoff, ms: 0, ok: true });
+        logger.step(requestId, telefone, 'atendimento/handoff-solicitado', { motivo: handoff.motivo });
+        toolResults.push({ role: 'tool', tool_call_id: toolCall.id, content: 'Encaminhamento iniciado. O sistema vai avisar a atendente no painel.' });
+        continue;
+      }
+
       logger.step(requestId, telefone, `tool/${nomeTool}`, { args });
 
       let resultado;
@@ -202,6 +212,7 @@ async function rodarAgente(mensagemUsuario, historico, rascunho, requestId, tele
     }
 
     messages.push(...toolResults);
+    if (handoff) break;
 
     resposta = await comRetry(
       () => openai.chat.completions.create({
@@ -219,6 +230,18 @@ async function rodarAgente(mensagemUsuario, historico, rascunho, requestId, tele
 
   if (iteracoes >= MAX_ITER) {
     logger.warn('agente/max-iter', 'Limite de iterações atingido', { requestId, telefone });
+  }
+
+  if (handoff) {
+    return {
+      texto: 'Vou chamar uma atendente para te ajudar. Ela vai continuar por aqui assim que possível.',
+      handoff,
+      toolCalls,
+      modelo: MODEL,
+      latenciaMs: Date.now() - t0,
+      tokensEntrada,
+      tokensSaida,
+    };
   }
 
   const textoFinal = resposta.choices[0].message?.content?.trim() || '';
