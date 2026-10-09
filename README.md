@@ -38,7 +38,8 @@ gravada como fala humana e a pausa de 10 minutos recomeça. Durante a pausa, tod
 mensagem de texto do cliente é gravada, mas o bot não responde. Ao fim dos 10
 minutos, a próxima mensagem do cliente volta ao agente; o histórico usado pelo
 modelo inclui as mensagens mais recentes de ambos os lados. A duração pode ser
-ajustada com `PAUSA_ATENDENTE_MINUTOS`.
+ajustada com `PAUSA_ATENDENTE_MINUTOS`. Áudios e imagens enviados pela atendente
+ficam registrados como mídia recebida, sem transcrição ou análise externa.
 
 Se a Evolution aceitar a mensagem e o processo cair antes de registrar o envio,
 uma retentativa pode repetir o aviso. A API de envio e o banco não compartilham
