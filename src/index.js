@@ -16,6 +16,7 @@ const {
 const { rodarAgente, confirmarPedido } = require('./agent');
 const { comRetry } = require('./utils/retry');
 const cfg = require('./config/restaurante');
+const { iniciarNotificacoes } = require('./notificacoes');
 
 const app = express();
 app.use(express.json({ limit: '10mb' }));
@@ -319,4 +320,5 @@ app.listen(PORT, () => {
     openai:    process.env.OPENAI_API_KEY ? '✓' : '✗ FALTANDO',
     evolution: process.env.EVOLUTION_URL  ? '✓' : '✗ FALTANDO',
   });
+  iniciarNotificacoes();   // avisa o cliente quando a cozinha move o pedido no painel
 });
