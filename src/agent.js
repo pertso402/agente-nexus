@@ -1,6 +1,7 @@
 'use strict';
 
 const OpenAI = require('openai');
+const { randomUUID } = require('node:crypto');
 const cfg = require('./config/restaurante');
 const { TOOLS, executarTool } = require('./tools');
 const { salvarRascunho, limparRascunho, criarPedidoCompleto } = require('./services/supabase');
@@ -38,7 +39,9 @@ function buildSystemPrompt(rascunho, disponibilidade) {
     ].filter(Boolean);
 
     estado = `\n\n## ESTADO ATUAL DO PEDIDO (já coletado — NÃO pergunte de novo)\n${linhas.join('\n') || '- (vazio)'}`;
-    if (av.completo) {
+    if (rascunho.pedido_id && rascunho.etapa_atual === 'aguardando_pix') {
+      estado += '\nPedido Pix já reservado. Aguarde comprovante/conferência: não peça SIM de novo, não refaça o pedido e não confirme recebimento. O cliente pode enviar PDF ou imagem aqui ou pelo cardápio.';
+    } else if (av.completo) {
       estado += `\n\n✅ TUDO COLETADO. Apresente o RESUMO FINAL e peça *SIM*. NÃO chame mais salvar_dados_pedido.`;
     } else {
       estado += `\n\n⏳ AINDA FALTA: ${descreverFaltando(av.faltando)}. Pergunte isso de forma natural.`;
@@ -97,7 +100,7 @@ Regras transversais do fluxo:
 - Assim que o cliente escolher um item, salve e CONFIRME de volta o item e o preço que o sistema registrou (ex: "Anotei: 1× [item] — R$ X ✅ Mais alguma coisa?"). Só avance após esse eco — é o que evita registrar o item errado.
 - Personalizações do item (sabor, meio a meio, ponto da carne, "sem cebola", borda) vão no campo "observacao" daquele item.
 - Quando o retorno disser "PRONTO_PARA_CONFIRMACAO": apresente o RESUMO FINAL e peça *SIM*.
-- Após o pedido confirmado por PIX, o sistema envia a chave. Quando chegar "📎 COMPROVANTE PIX CONFIRMADO", chame atualizar_status_pedido com "preparando" e agradeça.
+- Após registrar pedido PIX, o sistema envia a chave e aguarda comprovante. O sistema compara os dados; somente a equipe confirma o recebimento na conta e libera. NUNCA trate imagem/PDF, botão "já paguei" ou leitura da IA como pagamento confirmado.
 
 ## REGRAS CRÍTICAS (NUNCA quebrar)
 ⛔ NUNCA invente produtos, preços, chave PIX ou horário — sempre use as tools. Os preços vêm do sistema.
@@ -280,9 +283,11 @@ async function confirmarPedido(rascunho, telefone, requestId) {
   await salvarRascunho(telefone, { etapa_atual: 'processando' });
 
   let resultado;
+  const requisicaoPix = randomUUID();
   try {
     resultado = await comRetry(
       () => criarPedidoCompleto({
+        requisicao: requisicaoPix,
         nomeCliente:    rascunho.nome_cliente,
         telefone,
         tipoEntrega:    rascunho.tipo_entrega,

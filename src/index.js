@@ -18,6 +18,7 @@ const { rodarAgente, confirmarPedido } = require('./agent');
 const { comRetry } = require('./utils/retry');
 const cfg = require('./config/restaurante');
 const { iniciarNotificacoes } = require('./notificacoes');
+const { iniciarPix, tratarComprovantesWhatsApp } = require('./services/pix');
 const { criarAgrupador } = require('./utils/agrupador');
 const { avaliarFuncionamento } = require('./utils/horarios');
 const ESPERA_MENSAGENS_MS = Math.max(1, Number(process.env.AGRUPAR_MENSAGENS_SEGUNDOS) || 10) * 1000;
@@ -243,7 +244,7 @@ async function prepararEntrada({ msg, requestId }) {
       isComprovante = r.isComprovante;
       analiseImg = r.analise;
       conteudo = isComprovante
-        ? `📎 COMPROVANTE PIX CONFIRMADO: ${r.analise}${conteudo ? ' — Legenda: ' + conteudo : ''}`
+        ? `📎 [Possível comprovante recebido, pagamento não confirmado]: ${r.analise}${conteudo ? ' — Legenda: ' + conteudo : ''}`
         : `📎 [Imagem]: ${r.analise}${conteudo ? ' — Legenda: ' + conteudo : ''}`;
       logger.info('midia/imagem/ok', 'Analisada', { requestId, telefone, isComprovante });
     }
@@ -259,6 +260,14 @@ async function prepararEntrada({ msg, requestId }) {
 async function processarMensagens(entradas) {
   const { msg, requestId } = entradas[entradas.length - 1];
   const { telefone, jid, pushName } = msg;
+  // Comprovantes de pedidos existentes são recebidos mesmo fora do expediente.
+  try { if (await tratarComprovantesWhatsApp(entradas)) return; }
+  catch (err) { logger.error('pix/recebimento', err.message, { telefone });
+    const texto = 'Não consegui registrar o comprovante agora. Seu pedido continua aguardando conferência. Tente anexar pelo cardápio ou reenviar em instantes.';
+    const id = await enviarTexto(jid, texto);
+    await salvarMensagem(telefone, 'assistant', texto, { origem: 'agente', msgId: id, etapa: 'pix/erro' });
+    return;
+  }
   const preparadas = await Promise.all(entradas.map(prepararEntrada));
   const conteudo = preparadas.map(e => e.conteudo).filter(t => t?.trim()).join('\n');
   const isComprovante = preparadas.some(e => e.isComprovante);
@@ -313,27 +322,6 @@ async function processarMensagens(entradas) {
     // Grava o lote inteiro na ordem antes da resposta, sem duplicar no contexto.
     await salvarEntradas();
 
-    // ── FLUXO 1: comprovante PIX (código atualiza status, não depende da LLM) ─
-    if (isComprovante && rascunho?.etapa_atual === 'aguardando_pix') {
-      logger.step(requestId, telefone, 'pix/comprovante-recebido');
-      await enviarDigitando(jid, 1200);
-      try {
-        const pedido = await comRetry(() => atualizarStatusPedido(telefone, 'preparando'),
-          { tentativas: 3, requestId, etapa: 'statusPreparo' });
-        await limparRascunho(telefone);
-        const txt = `✅ Comprovante recebido, pagamento confirmado! Pedido *#${pedido.numero_pedido}* já tá indo pra cozinha 🍲\n\n⏱️ Logo logo fica pronto. Valeu, ${pushName}! 🍻`;
-        await comRetry(() => enviarTexto(jid, txt), { tentativas: 3, requestId, etapa: 'enviarPixOk' });
-        await Promise.all([
-          salvarEntradas(),
-          salvarMensagem(telefone, 'assistant', txt, { origem: 'agente', tipo: 'texto', requestId, etapa: rascunho?.etapa_atual }),
-        ]);
-        return;
-      } catch (err) {
-        logger.error('pix/comprovante/erro', err.message, { requestId, telefone, stack: err.stack });
-        // cai para o agente lidar
-      }
-    }
-
     // ── FLUXO 2: confirmação SIM (código cria o pedido) ──────────────────────
     if (ehConfirmacao(conteudo) && rascunho?.etapa_atual === 'aguardando_confirmacao') {
       logger.step(requestId, telefone, 'pedido/confirmando-via-SIM');
@@ -348,10 +336,10 @@ async function processarMensagens(entradas) {
 
         if (r.formaPagamento === 'pix') {
           const info = await buscarInfo();
-          const chave = info.chave_pix || 'não cadastrada';
+          const chave = r.chavePix || info.chave_pix || 'não cadastrada';
           txt = `✅ Pedido *#${r.numeroPedido}* registrado!\n\n` + corpo +
             `📱 *Chave PIX:* \`${chave}\`\n\n` +
-            `Faz o PIX e me manda o comprovante aqui que eu já libero pra cozinha 😊`;
+            `Envie o comprovante em PDF ou imagem por aqui, ou anexe no link:\n${r.linkPix}\n\nA equipe confere o recebimento na conta para liberar o pedido. 😊`;
         } else {
           const prazo = rascunho.tipo_entrega === 'delivery' ? cfg.prazoDelivery : cfg.prazoRetirada;
           txt = `✅ Pedido *#${r.numeroPedido}* confirmado!\n\n` + corpo +
@@ -366,7 +354,7 @@ async function processarMensagens(entradas) {
         return;
       } catch (err) {
         logger.error('pedido/confirmar/erro', err.message, { requestId, telefone, faltando: err.faltando, stack: err.stack });
-        const falta = err.code === 'LOJA_FECHADA' ? err.message : err.faltando?.length
+        const falta = ['LOJA_FECHADA', 'PIX_INDISPONIVEL'].includes(err.code) ? err.message : err.faltando?.length
           ? `Ainda preciso de: ${err.faltando.join(', ')}. Vamos completar?`
           : 'Tive um probleminha pra fechar o pedido. Pode me confirmar os dados de novo?';
         await enviarTexto(jid, `Opa! ${falta}`);
@@ -449,5 +437,6 @@ app.listen(PORT, () => {
     openai:    process.env.OPENAI_API_KEY ? '✓' : '✗ FALTANDO',
     evolution: process.env.EVOLUTION_URL  ? '✓' : '✗ FALTANDO',
   });
+  iniciarPix();
   iniciarNotificacoes();   // avisa o cliente quando a cozinha move o pedido no painel
 });

@@ -45,8 +45,9 @@ function extrairAnuncio(data) {
 function extrairMensagem(body) {
   const data = body.data || body;
   const key = data.key || {};
-  const message = data.message || {};
-  const messageType = data.messageType || Object.keys(message)[0] || 'conversation';
+  const base = data.message || {};
+  const message = base.documentWithCaptionMessage?.message || base;
+  const messageType = base.documentWithCaptionMessage ? 'documentMessage' : data.messageType || Object.keys(message)[0] || 'conversation';
 
   // fromMe não é mais descartado aqui: pode ser o agente (ecoando o que enviou)
   // ou um humano digitando no celular. Quem decide é o index.js — descartar
@@ -77,8 +78,8 @@ function extrairMensagem(body) {
   } else if (messageType === 'imageMessage') {
     texto = message.imageMessage?.caption || '';
   } else if (messageType === 'documentMessage') {
-    texto = '[Documento recebido]';
-    tipo = 'text';
+    texto = message.documentMessage?.caption || '';
+    tipo = 'documentMessage';
   } else {
     return null; // tipo não suportado
   }
@@ -86,10 +87,10 @@ function extrairMensagem(body) {
   // Quando webhookBase64=true, Evolution já inclui o base64 no payload
   const base64   = data.base64   || message.base64   || null;
   const mimetype = data.mimetype || message.mimetype ||
-    message.audioMessage?.mimetype || message.imageMessage?.mimetype || null;
+    message.audioMessage?.mimetype || message.imageMessage?.mimetype || message.documentMessage?.mimetype || null;
 
   return { telefone, jid, pushName, tipo, texto, fromMe, msgId: key.id || null,
-           mensagemRaw: message, base64, mimetype, anuncio: extrairAnuncio(data) };
+           mensagemRaw: message, base64, mimetype, nomeArquivo: message.documentMessage?.fileName || null, anuncio: extrairAnuncio(data) };
 }
 
 // ─── DOWNLOAD DE MÍDIA ────────────────────────────────────────────────────────

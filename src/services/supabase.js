@@ -416,7 +416,7 @@ async function atualizarStatsCliente(cliente, totalPedido) {
 
 // ─── PEDIDOS ──────────────────────────────────────────────────────────────────
 
-async function criarPedidoCompleto({ nomeCliente, telefone, tipoEntrega, endereco, formaPagamento, itens }) {
+async function criarPedidoCompleto({ nomeCliente, telefone, tipoEntrega, endereco, formaPagamento, itens, requisicao }) {
   const disponibilidade = avaliarFuncionamento(await buscarInfo());
   if (!disponibilidade.aberto) {
     const erro = new Error(disponibilidade.mensagem);
@@ -427,6 +427,7 @@ async function criarPedidoCompleto({ nomeCliente, telefone, tipoEntrega, enderec
   const listaItens = parseItens(itens);
   if (!listaItens.length) throw new Error('Pedido sem itens válidos.');
 
+  if (formaPagamento === 'pix') return require('./pix').criarPedidoPix({ nomeCliente, telefone, tipoEntrega, endereco, itens: listaItens, requisicao });
   const subtotal = calcularSubtotal(listaItens);
   const taxaConfig = await getTaxaEntrega();
   const taxaEntrega = tipoEntrega === 'delivery' ? taxaConfig : 0;
@@ -484,7 +485,7 @@ async function atualizarStatusPedido(telefone, novoStatus) {
 
   const { data: pedidos, error } = await sb
     .from('pedidos')
-    .select('id, numero_pedido, total')
+    .select('id, numero_pedido, total, forma_pagamento, pix_status')
     .eq('cliente_id', cli.id)
     .eq('status', 'pendente')
     .order('created_at', { ascending: false })
@@ -493,6 +494,7 @@ async function atualizarStatusPedido(telefone, novoStatus) {
   if (!pedidos?.length) throw new Error('Nenhum pedido pendente encontrado para este cliente.');
 
   const pedido = pedidos[0];
+  if (String(pedido.forma_pagamento).toLowerCase() === 'pix' && pedido.pix_status !== 'confirmado') throw new Error('O Pix precisa da conferência do recebimento pela equipe antes de liberar o preparo.');
   const { error: uErr } = await sb.from('pedidos').update({ status: novoStatus }).eq('id', pedido.id);
   if (uErr) throw new Error(`Supabase/atualizarStatus: ${uErr.message}`);
 
@@ -500,6 +502,7 @@ async function atualizarStatusPedido(telefone, novoStatus) {
 }
 
 module.exports = {
+  sb,
   carregarHistorico, salvarMensagem,
   carregarPausaAtiva, pausarAtendimento,
   carregarRascunho, salvarRascunho, atualizarRascunho, limparRascunho,

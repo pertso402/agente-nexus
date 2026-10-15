@@ -111,7 +111,7 @@ const TOOL_STATUS = {
   type: 'function',
   function: {
     name: 'atualizar_status_pedido',
-    description: 'Atualiza o status do pedido. Use "preparando" após confirmar comprovante PIX.',
+    description: 'Atualiza o status do pedido. Não confirma Pix; pagamentos Pix dependem da conferência humana no painel.',
     parameters: {
       type: 'object',
       properties: { novo_status: { type: 'string', enum: ['preparando', 'cancelado'] } },
@@ -211,6 +211,8 @@ async function executarTool(nome, args, contexto = {}) {
 
     case 'salvar_dados_pedido': {
       if (!telefone) return 'ERRO: telefone não disponível no contexto.';
+      const atual = await db.carregarRascunho(telefone);
+      if (atual?.pedido_id && atual.etapa_atual === 'aguardando_pix') return 'Este pedido já está reservado e aguarda comprovante/conferência do Pix. Não refaça nem confirme outro pedido. Oriente enviar PDF/imagem ou chamar a atendente.';
 
       const campos = {};
       if (args.nome_cliente)    campos.nome_cliente    = args.nome_cliente;

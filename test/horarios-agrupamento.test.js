@@ -82,6 +82,7 @@ function webhookFixture(data = '2026-10-15T21:00:00Z') {
     './utils/agrupador': { criarAgrupador: options => criarAgrupador({ ...options, ...clock }) },
     './utils/horarios': { avaliarFuncionamento: info => avaliarFuncionamento(info, new Date(data)) },
     './notificacoes': { iniciarNotificacoes() {} },
+    './services/pix': { iniciarPix() {}, tratarComprovantesWhatsApp: async () => false },
   };
   vm.runInNewContext(fs.readFileSync(arquivo,'utf8'), { require: nome => mocks[nome] || requireReal(nome), process: { env: {} }, module: { exports: {} } }, { filename: arquivo });
   return {

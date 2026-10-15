@@ -77,3 +77,13 @@ instância do agente por instância da Evolution; reinícios descartam lotes pen
 Avisos de status de pedidos continuam sendo enviados sem a espera de 10 segundos.
 
 Depois de atualizar, reimplante o agente com `npm start` (Node.js 22+).
+
+## Pix assistido com comprovante
+
+Execute `pix.sql` no Supabase e implante esta versão no EasyPanel. O arquivo cria
+rascunhos separados da fila da cozinha, armazena PDFs/imagens em bucket privado
+e mostra o código de conferência da equipe. O agente compara os dados; somente
+a atendente, com esse código, confirma o recebimento e libera para Novos.
+O novo Pix só é ativado em Loja → Pix com comprovante no cardápio depois de o
+agente atualizado estar conectado. Há um lembrete após 10 minutos, dentro do expediente.
+Mantenha uma instância do agente por Evolution. Não precisa atualizar a impressora.
