@@ -18,6 +18,14 @@ const { rodarAgente, confirmarPedido } = require('./agent');
 const { comRetry } = require('./utils/retry');
 const cfg = require('./config/restaurante');
 const { iniciarNotificacoes } = require('./notificacoes');
+const { criarAgrupador } = require('./utils/agrupador');
+const { avaliarFuncionamento } = require('./utils/horarios');
+const ESPERA_MENSAGENS_MS = Math.max(1, Number(process.env.AGRUPAR_MENSAGENS_SEGUNDOS) || 10) * 1000;
+const agrupador = criarAgrupador({
+  esperaMs: ESPERA_MENSAGENS_MS,
+  processar: processarMensagens,
+  onError: (err, telefone) => logger.error('mensagens/lote', err.message, { telefone }),
+});
 
 const app = express();
 app.use(express.json({ limit: '10mb' }));
@@ -125,6 +133,7 @@ app.post('/webhook', async (req, res) => {
   if (msg.fromMe) {
     try {
       if (await mensagemJaRegistrada(msg.msgId)) return;       // foi o próprio agente
+      await pausarAtendimento(msg.telefone, 'humano: atendente respondeu na conversa');
       const tipoHumano = msg.tipo === 'audioMessage' ? 'audio' : msg.tipo === 'imageMessage' ? 'imagem' : 'texto';
       let textoHumano = msg.texto?.trim() || (tipoHumano === 'audio'
         ? '[Áudio enviado pela atendente]'
@@ -173,6 +182,10 @@ app.post('/webhook', async (req, res) => {
     return;   // humano assumiu: o agente não responde por cima
   }
 
+  agrupador.adicionar(msg.telefone, { msg, requestId });
+});
+
+async function prepararEntrada({ msg, requestId }) {
   // telefone = identidade no banco | jid = endereço de resposta no WhatsApp (pode ser @lid)
   const { telefone, jid, pushName, tipo, anuncio, mensagemRaw, base64: base64Inline, mimetype: mimetypeInline } = msg;
   let conteudo = msg.texto;
@@ -199,9 +212,10 @@ app.post('/webhook', async (req, res) => {
   const metaEntrada = () => ({
     origem: 'cliente',
     tipo: tipo === 'audioMessage' ? 'audio' : tipo === 'imageMessage' ? 'imagem' : 'texto',
-    msgId, requestId, transcricao: transcricaoAudio, analiseImagem: analiseImg,
+    msgId: msg.msgId, requestId, transcricao: transcricaoAudio, analiseImagem: analiseImg,
   });
 
+  let isComprovante = false;
   try {
     // ── Mídia: áudio ───────────────────────────────────────────────────────
     if (tipo === 'audioMessage') {
@@ -218,7 +232,6 @@ app.post('/webhook', async (req, res) => {
     }
 
     // ── Mídia: imagem ──────────────────────────────────────────────────────
-    let isComprovante = false;
     if (tipo === 'imageMessage') {
       logger.step(requestId, telefone, 'midia/imagem');
       let b64 = base64Inline, mime = mimetypeInline || 'image/jpeg';
@@ -235,7 +248,30 @@ app.post('/webhook', async (req, res) => {
       logger.info('midia/imagem/ok', 'Analisada', { requestId, telefone, isComprovante });
     }
 
-    if (!conteudo?.trim()) return;
+  } catch (err) {
+    logger.error('midia/erro', err.message, { requestId, telefone });
+    conteudo = conteudo || (tipo === 'audioMessage' ? '[Áudio não pôde ser transcrito]' : '[Imagem não pôde ser analisada]');
+    return { conteudo, isComprovante: false, meta: { ...metaEntrada(), erro: err.message } };
+  }
+  return { conteudo, isComprovante, meta: metaEntrada() };
+}
+
+async function processarMensagens(entradas) {
+  const { msg, requestId } = entradas[entradas.length - 1];
+  const { telefone, jid, pushName } = msg;
+  const preparadas = await Promise.all(entradas.map(prepararEntrada));
+  const conteudo = preparadas.map(e => e.conteudo).filter(t => t?.trim()).join('\n');
+  const isComprovante = preparadas.some(e => e.isComprovante);
+  let entradasSalvas = false;
+  async function salvarEntradas(erro) {
+    if (entradasSalvas) return;
+    entradasSalvas = true;
+    for (const e of preparadas) {
+      if (e.conteudo?.trim()) await salvarMensagem(telefone, 'user', e.conteudo, { ...e.meta, ...(erro ? { erro } : {}) });
+    }
+  }
+  if (!conteudo) return;
+  try {
 
     // Durante a pausa, grava a mensagem do cliente e não responde por cima da
     // atendente. Depois que a pausa expira, o próximo envio volta ao agente e
@@ -245,14 +281,23 @@ app.post('/webhook', async (req, res) => {
       pausaAtiva = await carregarPausaAtiva(telefone);
     } catch (err) {
       logger.error('atendimento/pausa/consulta', err.message, { requestId, telefone, stack: err.stack });
-      await salvarMensagem(telefone, 'user', conteudo, { ...metaEntrada(), erro: 'pausa consultada sem sucesso' });
+      await salvarEntradas('pausa consultada sem sucesso');
       return;
     }
     if (pausaAtiva) {
-      await salvarMensagem(telefone, 'user', conteudo, metaEntrada());
+      await salvarEntradas();
       logger.info('atendimento/pausado', 'Mensagem registrada; agente aguardando atendente', {
         requestId, telefone, pausado_ate: pausaAtiva.pausado_ate,
       });
+      return;
+    }
+
+    // O bloqueio é determinístico: vale antes da saudação, IA e confirmação.
+    const disponibilidade = avaliarFuncionamento(await buscarInfo());
+    if (!disponibilidade.aberto) {
+      await salvarEntradas();
+      const idEnviado = await comRetry(() => enviarTexto(jid, disponibilidade.mensagem), { tentativas: 3, requestId, etapa: 'enviarForaHorario' });
+      await salvarMensagem(telefone, 'assistant', disponibilidade.mensagem, { origem: 'agente', tipo: 'texto', msgId: idEnviado, requestId, etapa: 'fora_horario' });
       return;
     }
 
@@ -265,6 +310,9 @@ app.post('/webhook', async (req, res) => {
       requestId, telefone, historico_msgs: historico.length, etapa: rascunho?.etapa_atual || 'sem rascunho',
     });
 
+    // Grava o lote inteiro na ordem antes da resposta, sem duplicar no contexto.
+    await salvarEntradas();
+
     // ── FLUXO 1: comprovante PIX (código atualiza status, não depende da LLM) ─
     if (isComprovante && rascunho?.etapa_atual === 'aguardando_pix') {
       logger.step(requestId, telefone, 'pix/comprovante-recebido');
@@ -276,7 +324,7 @@ app.post('/webhook', async (req, res) => {
         const txt = `✅ Comprovante recebido, pagamento confirmado! Pedido *#${pedido.numero_pedido}* já tá indo pra cozinha 🍲\n\n⏱️ Logo logo fica pronto. Valeu, ${pushName}! 🍻`;
         await comRetry(() => enviarTexto(jid, txt), { tentativas: 3, requestId, etapa: 'enviarPixOk' });
         await Promise.all([
-          salvarMensagem(telefone, 'user', conteudo, metaEntrada()),
+          salvarEntradas(),
           salvarMensagem(telefone, 'assistant', txt, { origem: 'agente', tipo: 'texto', requestId, etapa: rascunho?.etapa_atual }),
         ]);
         return;
@@ -312,18 +360,18 @@ app.post('/webhook', async (req, res) => {
 
         await comRetry(() => enviarTexto(jid, txt), { tentativas: 3, requestId, etapa: 'enviarConfirmacao' });
         await Promise.all([
-          salvarMensagem(telefone, 'user', conteudo, metaEntrada()),
+          salvarEntradas(),
           salvarMensagem(telefone, 'assistant', txt, { origem: 'agente', tipo: 'texto', requestId, etapa: rascunho?.etapa_atual }),
         ]);
         return;
       } catch (err) {
         logger.error('pedido/confirmar/erro', err.message, { requestId, telefone, faltando: err.faltando, stack: err.stack });
-        const falta = err.faltando?.length
+        const falta = err.code === 'LOJA_FECHADA' ? err.message : err.faltando?.length
           ? `Ainda preciso de: ${err.faltando.join(', ')}. Vamos completar?`
           : 'Tive um probleminha pra fechar o pedido. Pode me confirmar os dados de novo?';
         await enviarTexto(jid, `Opa! ${falta}`);
         await Promise.all([
-          salvarMensagem(telefone, 'user', conteudo, metaEntrada()),
+          salvarEntradas(),
           salvarMensagem(telefone, 'assistant', falta, { origem: 'agente', tipo: 'texto', requestId, erro: err.message }),
         ]);
         return;
@@ -333,13 +381,21 @@ app.post('/webhook', async (req, res) => {
     // ── FLUXO 3: agente conversacional ───────────────────────────────────────
     await enviarDigitando(jid, 2500);
     const msgParaAgente = `[Cliente: ${pushName} | WhatsApp: ${telefone}]\n${conteudo}`;
-    const r = await rodarAgente(msgParaAgente, historico, rascunho, requestId, telefone);
+    const r = await rodarAgente(msgParaAgente, historico, rascunho, requestId, telefone, disponibilidade);
+
+    // A atendente ou o fechamento podem ter ocorrido enquanto a IA respondia.
+    if (await carregarPausaAtiva(telefone)) return;
+    const funcionamentoAtual = avaliarFuncionamento(await buscarInfo());
+    if (!funcionamentoAtual.aberto) {
+      r.texto = funcionamentoAtual.mensagem;
+      r.handoff = null;
+    }
 
     if (r.handoff) {
       await pausarAtendimento(telefone, `handoff: ${r.handoff.motivo}`);
       const idEnviado = await comRetry(() => enviarTexto(jid, r.texto), { tentativas: 3, requestId, etapa: 'enviarHandoff' });
       await Promise.all([
-        salvarMensagem(telefone, 'user', conteudo, metaEntrada()),
+        salvarEntradas(),
         salvarMensagem(telefone, 'assistant', r.texto, {
           origem: 'agente', tipo: 'texto', msgId: idEnviado, requestId,
           toolCalls: r.toolCalls, modelo: r.modelo, latenciaMs: r.latenciaMs,
@@ -355,7 +411,7 @@ app.post('/webhook', async (req, res) => {
     if (!r.texto) {
       logger.warn('agente/vazio', 'Agente retornou vazio', { requestId, telefone });
       await enviarTexto(jid, 'Desculpa, não entendi bem 😅 Pode repetir?');
-      await salvarMensagem(telefone, 'user', conteudo, { ...metaEntrada(), erro: 'agente retornou vazio' });
+      await salvarEntradas('agente retornou vazio');
       return;
     }
 
@@ -363,7 +419,7 @@ app.post('/webhook', async (req, res) => {
     logger.info('whatsapp/ok', 'Resposta enviada', { requestId, telefone, chars: r.texto.length });
 
     await Promise.all([
-      salvarMensagem(telefone, 'user', conteudo, metaEntrada()),
+      salvarEntradas(),
       salvarMensagem(telefone, 'assistant', r.texto, {
         origem: 'agente', tipo: 'texto', msgId: idEnviado, requestId,
         toolCalls: r.toolCalls, modelo: r.modelo, latenciaMs: r.latenciaMs,
@@ -377,11 +433,12 @@ app.post('/webhook', async (req, res) => {
     // grava a mensagem do cliente mesmo quando o atendimento falha — senão a
     // conversa que mais interessa analisar é justamente a que some do histórico
     try {
-      await salvarMensagem(telefone, 'user', conteudo || '(sem texto)', { ...metaEntrada(), erro: err.message });
+      await salvarEntradas(err.message);
     } catch {}
     try { await enviarTexto(jid, 'Opa, tive um problema técnico aqui 😅 Tenta de novo em instantes!'); } catch {}
   }
-});
+}
+
 
 // ─── START ────────────────────────────────────────────────────────────────────
 const PORT = process.env.PORT || 3000;

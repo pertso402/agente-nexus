@@ -24,7 +24,7 @@ const MAX_ITER = 8;
 // vindo de config/restaurante.js. A LLM só conversa e extrai; o CÓDIGO controla
 // o estado, valida e cria o pedido — por isso o fluxo nunca "fura".
 
-function buildSystemPrompt(rascunho) {
+function buildSystemPrompt(rascunho, disponibilidade) {
   let estado = '';
   if (rascunho) {
     const av = avaliarRascunho(rascunho);
@@ -51,6 +51,7 @@ function buildSystemPrompt(rascunho) {
 
   return `Você é "${cfg.persona}", o atendente virtual do ${cfg.nome}${cfg.cidade ? ` (${cfg.cidade})` : ''}.
 
+${disponibilidade ? '## FUNCIONAMENTO (consultado no Supabase, fuso America/Sao_Paulo)\nHorários: ' + disponibilidade.horario + '\nStatus atual: ' + (disponibilidade.aberto ? 'aberto' : 'fechado') + '\nResponda a todas as mensagens do cliente recebidas em conjunto em uma única resposta.\n' : ''}
 ## PERSONALIDADE
 - Caloroso, simpático, ágil e objetivo. Português brasileiro natural, com leveza e bom humor.
 - Emojis com moderação. Trate o cliente pelo nome quando souber.
@@ -122,7 +123,7 @@ _Responde *SIM* pra eu fechar o pedido, ou me diz se quer mudar algo._`;
 
 // ─── LOOP PRINCIPAL DO AGENTE ─────────────────────────────────────────────────
 
-async function rodarAgente(mensagemUsuario, historico, rascunho, requestId, telefone) {
+async function rodarAgente(mensagemUsuario, historico, rascunho, requestId, telefone, disponibilidade) {
   // A abertura é fixa: a LLM não pode acrescentar alternativas ao cardápio.
   // Um rascunho ativo continua o atendimento mesmo se o histórico estiver vazio.
   if (!historico.length && !rascunho && cfg.mensagemInicial) {
@@ -152,7 +153,7 @@ async function rodarAgente(mensagemUsuario, historico, rascunho, requestId, tele
     { role: 'user', content: mensagemUsuario },
   ];
 
-  const systemMsg = { role: 'system', content: buildSystemPrompt(rascunho) };
+  const systemMsg = { role: 'system', content: buildSystemPrompt(rascunho, disponibilidade) };
 
   logger.step(requestId, telefone, 'agente/chamando-openai', {
     model: MODEL,

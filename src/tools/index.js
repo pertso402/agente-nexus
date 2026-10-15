@@ -2,6 +2,7 @@
 
 const db = require('../services/supabase');
 const cfg = require('../config/restaurante');
+const { avaliarFuncionamento } = require('../utils/horarios');
 const { descreverFaltando, calcularSubtotal, parseItens, normalizar } = require('../utils/pedido');
 
 // Ordem das categorias: comida primeiro, bebidas/condimentos por último
@@ -196,12 +197,13 @@ async function executarTool(nome, args, contexto = {}) {
 
     case 'info_restaurante': {
       const info = await db.buscarInfo();
+      const funcionamento = avaliarFuncionamento(info);
       return JSON.stringify({
         nome: info.nome || cfg.nome,
         endereco: info.endereco || '',
         chave_pix: info.chave_pix || '',
-        horario: info.horario || '',
-        loja_aberta: String(info.loja_aberta) !== 'false',
+        horario: funcionamento.horario,
+        loja_aberta: funcionamento.aberto,
         taxa_entrega_reais: Number(info.taxa_entrega || 5),
         pedido_minimo_reais: Number(info.pedido_minimo || 0),
       });

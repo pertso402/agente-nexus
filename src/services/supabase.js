@@ -1,4 +1,5 @@
 'use strict';
+const { avaliarFuncionamento } = require('../utils/horarios');
 
 const { createClient } = require('@supabase/supabase-js');
 const ws = require('ws');
@@ -416,6 +417,12 @@ async function atualizarStatsCliente(cliente, totalPedido) {
 // ─── PEDIDOS ──────────────────────────────────────────────────────────────────
 
 async function criarPedidoCompleto({ nomeCliente, telefone, tipoEntrega, endereco, formaPagamento, itens }) {
+  const disponibilidade = avaliarFuncionamento(await buscarInfo());
+  if (!disponibilidade.aberto) {
+    const erro = new Error(disponibilidade.mensagem);
+    erro.code = 'LOJA_FECHADA';
+    throw erro;
+  }
   const tel = String(telefone).replace(/\D/g, '');
   const listaItens = parseItens(itens);
   if (!listaItens.length) throw new Error('Pedido sem itens válidos.');
@@ -444,7 +451,11 @@ async function criarPedidoCompleto({ nomeCliente, telefone, tipoEntrega, enderec
     })
     .select('id, numero_pedido, total')
     .single();
-  if (pErr) throw new Error(`Supabase/criarPedido: ${pErr.message}`);
+  if (pErr) {
+    const erro = new Error(/LOJA_FECHADA/.test(pErr.message) ? (avaliarFuncionamento(await buscarInfo())).mensagem : 'Supabase/criarPedido: ' + pErr.message);
+    if (/LOJA_FECHADA/.test(pErr.message)) erro.code = 'LOJA_FECHADA';
+    throw erro;
+  }
 
   if (canal === 'recompra') await marcarOfertaConvertida(cliente.id, pedido.id);
 

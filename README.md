@@ -50,3 +50,30 @@ uma transação. Erros e tentativas ficam em `notificacoes_pedido_enviadas`.
 Use Node.js 22 ou superior. Execute `npm ci` e `npm test`. Os testes executam o SQL em Postgres local
 (PGlite), validam gatilhos/permissões/reservas e simulam o envio pela Evolution.
 Não usam dados nem enviam mensagens de produção.
+
+## Horário de funcionamento e agrupamento de mensagens
+
+O agente consulta `info_restaurante` no Supabase antes de responder e antes de criar
+um pedido. A chave `horarios_funcionamento` guarda a agenda semanal em JSON:
+`0` = domingo, `1` = segunda, até `6` = sábado; cada dia contém intervalos
+`[["17:30", "23:00"]]` ou `[]` para fechado. O fuso é sempre `America/Sao_Paulo`.
+Sem essa chave, vale o horário padrão: segunda a sexta 17h30–23h, sábado
+11h–23h e domingo fechado. Configuração inválida mantém o atendimento fechado.
+`loja_aberta=false` continua sendo uma pausa manual, mesmo dentro do expediente.
+
+Execute `horarios.sql` **uma única vez** no SQL Editor do Supabase. O arquivo
+registra o horário acima e adiciona uma proteção no banco contra novos pedidos
+fora do expediente. Não use `setup.sql` para isso: ele recria dados do cardápio.
+Não reaplique a migração depois de personalizar os horários, pois ela repõe a agenda
+padrão. O cardápio v3 edita a mesma configuração pelo painel da loja.
+
+Cada conversa aguarda **10 segundos sem novas mensagens** antes de responder.
+Nova mensagem reinicia a contagem; texto, áudio e imagem são reunidos em ordem
+e cada mensagem original fica registrada com seu ID e metadados. Conversas
+diferentes são independentes e uma mesma conversa processa um lote por vez.
+Configure `AGRUPAR_MENSAGENS_SEGUNDOS` para mudar a espera. O tempo de geração
+da resposta vem depois dessa espera. A fila é em memória: use uma única
+instância do agente por instância da Evolution; reinícios descartam lotes pendentes.
+Avisos de status de pedidos continuam sendo enviados sem a espera de 10 segundos.
+
+Depois de atualizar, reimplante o agente com `npm start` (Node.js 22+).
