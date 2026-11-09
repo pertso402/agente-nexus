@@ -14,6 +14,25 @@ function validarArquivo(buffer, mime) {
  return { mime: real, extensao: { 'application/pdf':'pdf','image/jpeg':'jpg','image/png':'png','image/webp':'webp' }[real], hash: crypto.createHash('sha256').update(buffer).digest('hex') };
 }
 const digitos = v => String(v || '').replace(/[^0-9]/g,'');
+// A chave pode ser CNPJ, CPF, celular, e-mail ou aleatória. Em chave de celular
+// o comprovante traz o CPF do titular em documento_destino — também 11 dígitos —,
+// então ali só a própria chave lida no comprovante serve para comparar.
+function tipoChave(chave) {
+ const s=String(chave||'').trim();
+ if (s.includes('@')) return 'email';
+ if (/^[0-9a-f]{8}-[0-9a-f]{4}-/i.test(s)) return 'aleatoria';
+ const d=digitos(s);
+ if (d.length===14) return 'cnpj';
+ if (/^(55)?[1-9]{2}9[0-9]{8}$/.test(d)) return 'celular';
+ return d.length===11 ? 'cpf' : 'outra';
+}
+function normalizarChave(valor, tipo) {
+ const s=String(valor||'').trim().toLowerCase();
+ if (!s || s.includes('*')) return null;          // mascarado: não dá para conferir
+ if (tipo==='email' || tipo==='aleatoria') return s;
+ const d=digitos(s);
+ return tipo==='celular' && d.length===13 && d.startsWith('55') ? d.slice(2) : d;
+}
 function compararComprovante(leitura, pedido, agora = new Date()) {
  const divergencias=[], faltas=[];
  if (leitura?.comprovante !== true) return { status:'inconclusivo', motivos:['O arquivo não pôde ser identificado como comprovante de Pix.'] };
@@ -23,10 +42,11 @@ function compararComprovante(leitura, pedido, agora = new Date()) {
  const valor = leitura.valor;
  if (typeof valor !== 'number' || !Number.isFinite(valor) || valor<=0) faltas.push('Não foi possível ler o valor.');
  else if (Math.round(valor*100)!==Math.round(Number(pedido.total)*100)) divergencias.push('O valor do comprovante difere do total do pedido.');
- const esperado=digitos(pedido.chave);
- const docs=[digitos(leitura.chave_destino),digitos(leitura.documento_destino)].filter(d=>d.length===14);
- if (!docs.length || esperado.length!==14) faltas.push('Não foi possível conferir o CNPJ completo do destinatário.');
- else if (!docs.includes(esperado)) divergencias.push('O CNPJ do destinatário difere da chave Pix do restaurante.');
+ const tipo=tipoChave(pedido.chave), esperado=normalizarChave(pedido.chave,tipo);
+ const campos=tipo==='cnpj'||tipo==='cpf' ? [leitura.chave_destino,leitura.documento_destino] : [leitura.chave_destino];
+ const lidos=campos.map(v=>normalizarChave(v,tipo)).filter(v=>v && esperado && v.length===esperado.length);
+ if (!esperado || !lidos.length) faltas.push('Não foi possível conferir a chave Pix do destinatário.');
+ else if (!lidos.includes(esperado)) divergencias.push('O destinatário do comprovante difere da chave Pix do restaurante.');
  const textoData=String(leitura.data_hora || '');
  const data = /(?:Z|[+-][0-9]{2}:[0-9]{2})$/.test(textoData) ? new Date(textoData) : new Date(NaN);
  if (!Number.isFinite(data.getTime())) faltas.push('Não foi possível conferir a data e a hora do pagamento.');

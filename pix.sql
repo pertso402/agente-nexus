@@ -47,7 +47,8 @@ CREATE INDEX IF NOT EXISTS pix_comprovantes_transacao ON pix_privado.comprovante
 ALTER TABLE pix_privado.cobrancas ENABLE ROW LEVEL SECURITY;
 ALTER TABLE pix_privado.comprovantes ENABLE ROW LEVEL SECURITY;
 REVOKE ALL ON ALL TABLES IN SCHEMA pix_privado FROM PUBLIC,anon,authenticated;
-INSERT INTO public.info_restaurante(chave,valor) VALUES ('chave_pix','02668346000198') ON CONFLICT(chave) DO UPDATE SET valor=excluded.valor;
+-- Não sobrescreve: a chave é editada pelo painel (trocada em 09/11 para o celular).
+INSERT INTO public.info_restaurante(chave,valor) VALUES ('chave_pix','44999163854') ON CONFLICT(chave) DO NOTHING;
 INSERT INTO public.info_restaurante(chave,valor) VALUES ('pix_habilitado','false') ON CONFLICT(chave) DO NOTHING;
 
 -- O pedido e os itens nascem juntos. O token é devolvido somente a quem o criou.

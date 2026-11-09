@@ -8,6 +8,14 @@ test('compara valor, destinatário, data e situação sem confirmar crédito',()
  for(const mudanca of [{valor:109.99},{documento_destino:'11111111000111'},{situacao:'agendado'},{data_hora:'2026-10-14T18:00:00-03:00'},{data_hora:'2026-10-16T18:00:00-03:00'}]) assert.equal(compararComprovante({...leitura,...mudanca},pedido,agora).status,'divergente');
  for(const mudanca of [{documento_destino:'02.***.***/0001-98'},{data_hora:null},{valor:null},{transacao:null},{comprovante:false}])assert.equal(compararComprovante({...leitura,...mudanca},pedido,agora).status,'inconclusivo');
 });
+test('chave de celular: confere pela chave lida, não pelo CPF do titular',()=>{
+ const agora=new Date('2026-10-15T21:03:00Z');const cel={...pedido,chave:'44999163854'};
+ const base={...leitura,documento_destino:'***.456.789-**'};
+ for(const chave_destino of ['+55 44 99916-3854','(44) 99916-3854','5544999163854'])assert.equal(compararComprovante({...base,chave_destino},cel,agora).status,'compativel',chave_destino);
+ assert.equal(compararComprovante({...base,chave_destino:'+55 44 98888-7777'},cel,agora).status,'divergente');
+ for(const mudanca of [{chave_destino:'+55 (44) *****-3854'},{chave_destino:null},{chave_destino:null,documento_destino:'12345678901'}])
+  assert.equal(compararComprovante({...base,...mudanca},cel,agora).status,'inconclusivo',JSON.stringify(mudanca));
+});
 test('aceita PDF e imagens reais, recusa MIME falso e arquivo grande',()=>{
  assert.equal(validarArquivo(Buffer.from('%PDF-1.4 teste'),'application/pdf').extensao,'pdf');
  assert.equal(validarArquivo(Buffer.from([255,216,255,1]),'image/jpeg').mime,'image/jpeg');
