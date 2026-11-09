@@ -10,9 +10,11 @@ const { transcreverAudio, analisarImagem } = require('./services/media');
 const {
   carregarHistorico, salvarMensagem,
   carregarPausaAtiva, pausarAtendimento,
-  carregarRascunho, limparRascunho,
+  carregarRascunhoAtivo, limparRascunho,
   buscarInfo, atualizarStatusPedido, registrarOrigemAnuncio,
   mensagemJaRegistrada,
+  contatoIgnorado, conversaIniciadaPelaLoja, semConversaRecente,
+  carregarFaq, mensagensRecentes, reabrirLojaSeEsquecida,
 } = require('./services/supabase');
 const { rodarAgente, confirmarPedido } = require('./agent');
 const { comRetry } = require('./utils/retry');
@@ -21,6 +23,8 @@ const { iniciarNotificacoes } = require('./notificacoes');
 const { iniciarPix, tratarComprovantesWhatsApp } = require('./services/pix');
 const { criarAgrupador } = require('./utils/agrupador');
 const { avaliarFuncionamento } = require('./utils/horarios');
+const { proximaAbertura } = require('./utils/funcionamento');
+const { apenasSaudacao, ehConfirmacao, chavePixValida } = require('./utils/texto');
 const ESPERA_MENSAGENS_MS = Math.max(1, Number(process.env.AGRUPAR_MENSAGENS_SEGUNDOS) || 10) * 1000;
 const agrupador = criarAgrupador({
   esperaMs: ESPERA_MENSAGENS_MS,
@@ -74,17 +78,6 @@ function telefonePermitido(telefone) {
   return PERMITIDOS.some(p => [...variantesTelefone(p)].some(v => vs.has(v)));
 }
 
-// Confirmações que disparam a criação do pedido
-const CONFIRMACOES = new Set([
-  'sim', 'simm', 'sim!', 's', '1', 'confirmar', 'confirma', 'confirmo',
-  'pode confirmar', 'pode fechar', 'fechar', 'fechou', 'isso', 'isso mesmo',
-  'ta certo', 'tá certo', 'certo', 'correto', 'ok', 'okay', 'beleza', 'blz', 'pode ser',
-]);
-function ehConfirmacao(texto) {
-  const t = String(texto || '').trim().toLowerCase().replace(/[.!]+$/, '');
-  return CONFIRMACOES.has(t);
-}
-
 // ─── HEALTH CHECK ─────────────────────────────────────────────────────────────
 app.get('/health', (_req, res) => {
   res.json({
@@ -128,19 +121,35 @@ app.post('/webhook', async (req, res) => {
     return;
   }
 
+  // Equipe, fornecedores e família usam o mesmo número. Esses contatos não
+  // passam pela IA nem vão para o banco (áudios pessoais eram transcritos).
+  try {
+    if (await contatoIgnorado(msg.telefone)) {
+      logger.info('webhook/contato-ignorado', 'Contato da equipe/fornecedor — não processado', { requestId });
+      return;
+    }
+  } catch (err) {
+    logger.error('webhook/contatos-ignorados', err.message, { requestId });
+  }
+
   // ── Mensagem com fromMe: ou é o eco do que o agente mandou (já gravado), ou
   // é um humano respondendo pelo celular. O humano precisa ficar no histórico:
   // é onde o agente não deu conta, que é justamente o que se quer melhorar.
   if (msg.fromMe) {
     try {
       if (await mensagemJaRegistrada(msg.msgId)) return;       // foi o próprio agente
+      // Mensagem da loja abrindo conversa (ou dentro de uma que ela abriu) é
+      // assunto da equipe: guarda o texto, mas não manda áudio/foto para a IA.
+      const daLoja = await semConversaRecente(msg.telefone) || await conversaIniciadaPelaLoja(msg.telefone);
       await pausarAtendimento(msg.telefone, 'humano: atendente respondeu na conversa');
       const tipoHumano = msg.tipo === 'audioMessage' ? 'audio' : msg.tipo === 'imageMessage' ? 'imagem' : 'texto';
       let textoHumano = msg.texto?.trim() || (tipoHumano === 'audio'
         ? '[Áudio enviado pela atendente]'
         : tipoHumano === 'imagem' ? '[Imagem enviada pela atendente]' : '');
       let transcricaoHumana = null, analiseImagemHumana = null;
-      if (tipoHumano === 'audio') {
+      if (daLoja) {
+        // texto/legenda já está em textoHumano
+      } else if (tipoHumano === 'audio') {
         try {
           const midia = msg.base64
             ? { base64: msg.base64, mimetype: msg.mimetype || 'audio/ogg' }
@@ -257,9 +266,28 @@ async function prepararEntrada({ msg, requestId }) {
   return { conteudo, isComprovante, meta: metaEntrada() };
 }
 
+const ROTULO_MIDIA = { audioMessage: '[Áudio]', imageMessage: '[Imagem]', documentMessage: '[Documento]' };
+
 async function processarMensagens(entradas) {
   const { msg, requestId } = entradas[entradas.length - 1];
   const { telefone, jid, pushName } = msg;
+
+  // Conversa que a equipe começou (motoboy, fornecedor, "qual o número da sua
+  // casa?"): grava o que o contato disse, sem IA e sem transcrever mídia.
+  let daLoja = false;
+  try { daLoja = await conversaIniciadaPelaLoja(telefone); }
+  catch (err) { logger.error('atendimento/conversa-da-loja', err.message, { requestId, telefone }); }
+  if (daLoja) {
+    for (const { msg: m, requestId: rid } of entradas) {
+      const texto = [ROTULO_MIDIA[m.tipo], m.texto?.trim()].filter(Boolean).join(' ');
+      if (texto) await salvarMensagem(telefone, 'user', texto, {
+        origem: 'cliente', tipo: m.tipo === 'audioMessage' ? 'audio' : m.tipo === 'imageMessage' ? 'imagem' : 'texto',
+        msgId: m.msgId, requestId: rid, etapa: 'conversa_da_loja',
+      });
+    }
+    logger.info('atendimento/conversa-da-loja', 'Conversa iniciada pela equipe — agente fora', { requestId, telefone });
+    return;
+  }
   // Comprovantes de pedidos existentes são recebidos mesmo fora do expediente.
   try { if (await tratarComprovantesWhatsApp(entradas)) return; }
   catch (err) { logger.error('pix/recebimento', err.message, { telefone });
@@ -302,18 +330,26 @@ async function processarMensagens(entradas) {
     }
 
     // O bloqueio é determinístico: vale antes da saudação, IA e confirmação.
-    const disponibilidade = avaliarFuncionamento(await buscarInfo());
+    const info = await buscarInfo();
+    const disponibilidade = avaliarFuncionamento(info);
     if (!disponibilidade.aberto) {
       await salvarEntradas();
-      const idEnviado = await comRetry(() => enviarTexto(jid, disponibilidade.mensagem), { tentativas: 3, requestId, etapa: 'enviarForaHorario' });
-      await salvarMensagem(telefone, 'assistant', disponibilidade.mensagem, { origem: 'agente', tipo: 'texto', msgId: idEnviado, requestId, etapa: 'fora_horario' });
+      // Um aviso basta: teve cliente recebendo o mesmo texto 4 vezes seguidas.
+      const recentes = await mensagensRecentes(telefone, 3).catch(() => []);
+      if (recentes.some(m => m.origem === 'agente' && m.etapa_pedido === 'fora_horario')) {
+        logger.info('atendimento/fechado', 'Aviso de fechado já enviado — só registrado', { requestId, telefone });
+        return;
+      }
+      const texto = mensagemFechado(disponibilidade, info);
+      const idEnviado = await comRetry(() => enviarTexto(jid, texto), { tentativas: 3, requestId, etapa: 'enviarForaHorario' });
+      await salvarMensagem(telefone, 'assistant', texto, { origem: 'agente', tipo: 'texto', msgId: idEnviado, requestId, etapa: 'fora_horario' });
       return;
     }
 
     // ── Estado ──────────────────────────────────────────────────────────────
     const [historico, rascunho] = await Promise.all([
       comRetry(() => carregarHistorico(telefone), { tentativas: 2, requestId, etapa: 'carregarHistorico' }),
-      carregarRascunho(telefone),
+      carregarRascunhoAtivo(telefone),
     ]);
     logger.info('estado/ok', 'Estado carregado', {
       requestId, telefone, historico_msgs: historico.length, etapa: rascunho?.etapa_atual || 'sem rascunho',
@@ -334,33 +370,37 @@ async function processarMensagens(entradas) {
         const corpo =
           `🛍️ Subtotal: ${fmt(r.subtotal)}\n` + linhaTaxa + `💰 *Total: ${fmt(r.total)}*\n\n`;
 
+        let semChave = false;
         if (r.formaPagamento === 'pix') {
-          const info = await buscarInfo();
-          const chave = r.chavePix || info.chave_pix || 'não cadastrada';
+          const chave = [r.chavePix, info.chave_pix].find(chavePixValida);
+          semChave = !chave;
           txt = `✅ Pedido *#${r.numeroPedido}* registrado!\n\n` + corpo +
-            `📱 *Chave PIX:* \`${chave}\`\n\n` +
-            `Envie o comprovante em PDF ou imagem por aqui, ou anexe no link:\n${r.linkPix}\n\nA equipe confere o recebimento na conta para liberar o pedido. 😊`;
+            (chave ? `📱 *Chave PIX:* \`${chave}\`\n\n` : '📱 A equipe já te manda a chave PIX por aqui.\n\n') +
+            (r.linkPix ? `Envie o comprovante em PDF ou imagem por aqui, ou anexe no link:\n${r.linkPix}` : 'Depois do pagamento, é só mandar o comprovante aqui.') +
+            '\n\nA equipe confere o recebimento na conta para liberar o pedido. 😊';
         } else {
           const prazo = rascunho.tipo_entrega === 'delivery' ? cfg.prazoDelivery : cfg.prazoRetirada;
           txt = `✅ Pedido *#${r.numeroPedido}* confirmado!\n\n` + corpo +
             `Já tá indo pra cozinha! ⏱️ Previsão: ${prazo}. Bom apetite, ${pushName}! 🍻`;
         }
 
-        await comRetry(() => enviarTexto(jid, txt), { tentativas: 3, requestId, etapa: 'enviarConfirmacao' });
+        // o id evita que o eco desta mensagem seja lido como atendente humana
+        const idConfirmacao = await comRetry(() => enviarTexto(jid, txt), { tentativas: 3, requestId, etapa: 'enviarConfirmacao' });
         await Promise.all([
           salvarEntradas(),
-          salvarMensagem(telefone, 'assistant', txt, { origem: 'agente', tipo: 'texto', requestId, etapa: rascunho?.etapa_atual }),
+          salvarMensagem(telefone, 'assistant', txt, { origem: 'agente', tipo: 'texto', msgId: idConfirmacao, requestId, etapa: rascunho?.etapa_atual }),
         ]);
+        if (semChave) await pausarAtendimento(telefone, `handoff: pedido #${r.numeroPedido} em Pix — enviar a chave ao cliente (chave não cadastrada no sistema)`);
         return;
       } catch (err) {
         logger.error('pedido/confirmar/erro', err.message, { requestId, telefone, faltando: err.faltando, stack: err.stack });
         const falta = ['LOJA_FECHADA', 'PIX_INDISPONIVEL'].includes(err.code) ? err.message : err.faltando?.length
           ? `Ainda preciso de: ${err.faltando.join(', ')}. Vamos completar?`
           : 'Tive um probleminha pra fechar o pedido. Pode me confirmar os dados de novo?';
-        await enviarTexto(jid, `Opa! ${falta}`);
+        const idFalta = await enviarTexto(jid, `Opa! ${falta}`);
         await Promise.all([
           salvarEntradas(),
-          salvarMensagem(telefone, 'assistant', falta, { origem: 'agente', tipo: 'texto', requestId, erro: err.message }),
+          salvarMensagem(telefone, 'assistant', `Opa! ${falta}`, { origem: 'agente', tipo: 'texto', msgId: idFalta, requestId, erro: err.message }),
         ]);
         return;
       }
@@ -369,52 +409,82 @@ async function processarMensagens(entradas) {
     // ── FLUXO 3: agente conversacional ───────────────────────────────────────
     await enviarDigitando(jid, 2500);
     const msgParaAgente = `[Cliente: ${pushName} | WhatsApp: ${telefone}]\n${conteudo}`;
-    const r = await rodarAgente(msgParaAgente, historico, rascunho, requestId, telefone, disponibilidade);
+    const faq = await carregarFaq().catch(() => []);
+    const r = await rodarAgente(msgParaAgente, historico, rascunho, requestId, telefone, disponibilidade, { faq });
 
-    // A atendente ou o fechamento podem ter ocorrido enquanto a IA respondia.
-    if (await carregarPausaAtiva(telefone)) return;
-    const funcionamentoAtual = avaliarFuncionamento(await buscarInfo());
-    if (!funcionamentoAtual.aberto) {
-      r.texto = funcionamentoAtual.mensagem;
-      r.handoff = null;
-    }
+    // Envia uma resposta do agente. Devolve true quando a conversa deve parar.
+    const responder = async (r) => {
+      // A atendente ou o fechamento podem ter ocorrido enquanto a IA respondia.
+      if (await carregarPausaAtiva(telefone)) return true;
+      const funcionamentoAtual = avaliarFuncionamento(await buscarInfo());
+      if (!funcionamentoAtual.aberto) {
+        r.texto = funcionamentoAtual.mensagem;
+        r.handoff = null;
+      }
 
-    if (r.handoff) {
-      await pausarAtendimento(telefone, `handoff: ${r.handoff.motivo}`);
-      const idEnviado = await comRetry(() => enviarTexto(jid, r.texto), { tentativas: 3, requestId, etapa: 'enviarHandoff' });
+      if (r.handoff) {
+        // O cliente que seguia escrevendo recebia "Vou chamar uma atendente" a
+        // cada mensagem. Segunda vez: avisa que já chamou. Depois: só registra.
+        const recentes = await mensagensRecentes(telefone, 2).catch(() => []);
+        let jaChamou = 0;
+        for (const m of recentes) {
+          if (m.origem === 'humano') break;
+          if (m.etapa_pedido === 'atendimento/handoff') jaChamou++;
+        }
+        await pausarAtendimento(telefone, `handoff: ${r.handoff.motivo}`);
+        if (jaChamou >= 2) {
+          await salvarEntradas();
+          logger.info('atendimento/handoff', 'Atendente já chamada — sem nova mensagem ao cliente', { requestId, telefone, motivo: r.handoff.motivo });
+          return true;
+        }
+        if (jaChamou === 1) r.texto = 'Já avisei a equipe 🙏 Assim que alguém estiver livre, continua com você por aqui.';
+        const idEnviado = await comRetry(() => enviarTexto(jid, r.texto), { tentativas: 3, requestId, etapa: 'enviarHandoff' });
+        await Promise.all([
+          salvarEntradas(),
+          salvarMensagem(telefone, 'assistant', r.texto, {
+            origem: 'agente', tipo: 'texto', msgId: idEnviado, requestId,
+            toolCalls: r.toolCalls, modelo: r.modelo, latenciaMs: r.latenciaMs,
+            tokensEntrada: r.tokensEntrada, tokensSaida: r.tokensSaida, etapa: 'atendimento/handoff',
+          }),
+        ]);
+        logger.info('atendimento/handoff', 'Atendente avisada no painel; agente pausado', {
+          requestId, telefone, motivo: r.handoff.motivo,
+        });
+        return true;
+      }
+
+      if (!r.texto) {
+        logger.warn('agente/vazio', 'Agente retornou vazio', { requestId, telefone });
+        await enviarTexto(jid, 'Desculpa, não entendi bem 😅 Pode repetir?');
+        await salvarEntradas('agente retornou vazio');
+        return true;
+      }
+
+      const idEnviado = await comRetry(() => enviarTexto(jid, r.texto), { tentativas: 3, requestId, etapa: 'enviarResposta' });
+      logger.info('whatsapp/ok', 'Resposta enviada', { requestId, telefone, chars: r.texto.length });
+
       await Promise.all([
         salvarEntradas(),
         salvarMensagem(telefone, 'assistant', r.texto, {
           origem: 'agente', tipo: 'texto', msgId: idEnviado, requestId,
           toolCalls: r.toolCalls, modelo: r.modelo, latenciaMs: r.latenciaMs,
-          tokensEntrada: r.tokensEntrada, tokensSaida: r.tokensSaida, etapa: 'atendimento/handoff',
+          tokensEntrada: r.tokensEntrada, tokensSaida: r.tokensSaida,
+          etapa: rascunho?.etapa_atual || 'inicio',
         }),
       ]);
-      logger.info('atendimento/handoff', 'Atendente avisada no painel; agente pausado', {
-        requestId, telefone, motivo: r.handoff.motivo,
-      });
-      return;
+      return false;
+    };
+
+    if (await responder(r)) return;
+
+    // Primeiro contato recebe sempre o texto fixo (PR #1). Se a pessoa já veio
+    // com uma pergunta ("vocês entregam?", "aceitam ticket?"), ela ficava sem
+    // resposta — agora a IA responde logo depois, numa segunda mensagem.
+    const ehAbertura = r.modelo == null && r.texto === cfg.mensagemInicial;
+    if (ehAbertura && !apenasSaudacao(conteudo)) {
+      await enviarDigitando(jid, 2500);
+      await responder(await rodarAgente(msgParaAgente, [{ role: 'assistant', content: r.texto }], rascunho, requestId, telefone, disponibilidade, { faq }));
     }
-
-    if (!r.texto) {
-      logger.warn('agente/vazio', 'Agente retornou vazio', { requestId, telefone });
-      await enviarTexto(jid, 'Desculpa, não entendi bem 😅 Pode repetir?');
-      await salvarEntradas('agente retornou vazio');
-      return;
-    }
-
-    const idEnviado = await comRetry(() => enviarTexto(jid, r.texto), { tentativas: 3, requestId, etapa: 'enviarResposta' });
-    logger.info('whatsapp/ok', 'Resposta enviada', { requestId, telefone, chars: r.texto.length });
-
-    await Promise.all([
-      salvarEntradas(),
-      salvarMensagem(telefone, 'assistant', r.texto, {
-        origem: 'agente', tipo: 'texto', msgId: idEnviado, requestId,
-        toolCalls: r.toolCalls, modelo: r.modelo, latenciaMs: r.latenciaMs,
-        tokensEntrada: r.tokensEntrada, tokensSaida: r.tokensSaida,
-        etapa: rascunho?.etapa_atual || 'inicio',
-      }),
-    ]);
 
   } catch (err) {
     logger.error('webhook/erro-geral', err.message, { requestId, telefone, stack: err.stack });
@@ -428,6 +498,25 @@ async function processarMensagens(entradas) {
 }
 
 
+// "Estamos fora do horário" + quando abre. Pausa manual não tem previsão.
+function mensagemFechado(disponibilidade, info) {
+  const prox = disponibilidade.motivo === 'horario' ? proximaAbertura(info) : null;
+  if (!prox) return disponibilidade.mensagem;
+  const partes = disponibilidade.mensagem.split('\n\n');
+  partes.splice(partes.length - 1, 0, prox.texto);
+  return partes.join('\n\n');
+}
+
+// Reabre a loja quando alguém fechou no painel num dia anterior e esqueceu.
+function iniciarAberturaAutomatica() {
+  if (String(process.env.REABRIR_LOJA_AUTOMATICO ?? 'true') === 'false') return;
+  const rodar = () => reabrirLojaSeEsquecida()
+    .then(r => { if (r) logger.warn('loja/reaberta', 'Loja reaberta pela agenda (estava fechada desde outro dia)', { fechadaEm: r.fechadaEm }); })
+    .catch(err => logger.error('loja/reabertura', err.message, {}));
+  rodar();
+  setInterval(rodar, 60_000).unref?.();
+}
+
 // ─── START ────────────────────────────────────────────────────────────────────
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
@@ -438,5 +527,6 @@ app.listen(PORT, () => {
     evolution: process.env.EVOLUTION_URL  ? '✓' : '✗ FALTANDO',
   });
   iniciarPix();
+  iniciarAberturaAutomatica();
   iniciarNotificacoes();   // avisa o cliente quando a cozinha move o pedido no painel
 });

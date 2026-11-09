@@ -7,6 +7,8 @@ const vm = require('node:vm');
 const { createRequire } = require('node:module');
 const { avaliarFuncionamento, PADRAO } = require('../src/utils/horarios');
 const { criarAgrupador } = require('../src/utils/agrupador');
+const { proximaAbertura } = require('../src/utils/funcionamento');
+const cfg = require('../src/config/restaurante');
 const { PGlite } = require('@electric-sql/pglite');
 
 const datas = [
@@ -58,16 +60,26 @@ test('uma conversa não processa dois lotes simultaneamente e continua após fal
 });
 function webhookFixture(data = '2026-10-15T21:00:00Z') {
   const arquivo = path.join(__dirname, '../src/index.js'), requireReal = createRequire(arquivo);
-  const clock = relogio(), salvas = [], envios = [], agentes = [], criados = [];
-  let handler, pausa = null, info = {}, rascunho = null, onAgente = null;
+  const clock = relogio(), salvas = [], envios = [], agentes = [], criados = [], pausas = [];
+  const ignorados = new Set();
+  let handler, pausa = null, info = {}, rascunho = null, onAgente = null, daLoja = false;
+  let resposta = () => ({ texto: 'Resposta única' });
+  let confirmar = async () => { throw new Error('Não deveria confirmar'); };
   const db = {
     buscarInfo: async () => info,
     carregarHistorico: async () => salvas.map(e => ({ role: e.role, content: e.content })),
     salvarMensagem: async (telefone, role, content, meta) => { salvas.push({ telefone, role, content, meta }); return true; },
     carregarPausaAtiva: async () => pausa,
-    pausarAtendimento: async () => { pausa = { pausado_ate: '2099-01-01' }; },
-    carregarRascunho: async () => rascunho,
+    pausarAtendimento: async (_tel, motivo) => { pausas.push(motivo); pausa = { pausado_ate: '2099-01-01' }; },
+    carregarRascunhoAtivo: async () => rascunho,
     mensagemJaRegistrada: async () => false,
+    contatoIgnorado: async tel => ignorados.has(tel),
+    conversaIniciadaPelaLoja: async () => daLoja,
+    semConversaRecente: async () => false,
+    carregarFaq: async () => [],
+    // mais nova primeiro, como no banco
+    mensagensRecentes: async () => salvas.slice().reverse().map(e => ({ origem: e.meta?.origem, etapa_pedido: e.meta?.etapa || null })),
+    reabrirLojaSeEsquecida: async () => null,
   };
   const express = () => ({ use() {}, get() {}, post: (_route, fn) => { handler = fn; }, listen: (_port, fn) => fn() });
   express.json = () => ({});
@@ -77,17 +89,20 @@ function webhookFixture(data = '2026-10-15T21:00:00Z') {
     './services/evolution': { extrairMensagem: body => body.msg, enviarTexto: async (jid, texto) => { envios.push({ jid, texto }); return 'id-' + envios.length; }, enviarDigitando: async () => {} },
     './services/media': { transcreverAudio: async () => 'Áudio de teste', analisarImagem: async () => ({ isComprovante: false, analise: 'Imagem de teste' }) },
     './services/supabase': db,
-    './agent': { rodarAgente: async (...args) => { agentes.push(args); if (onAgente) await onAgente(); return { texto: 'Resposta única' }; }, confirmarPedido: async (...args) => { criados.push(args); throw new Error('Não deveria confirmar'); } },
+    './agent': { rodarAgente: async (...args) => { agentes.push(args); if (onAgente) await onAgente(); return resposta(...args); }, confirmarPedido: async (...args) => { criados.push(args); return confirmar(...args); } },
     './utils/retry': { comRetry: fn => fn() },
     './utils/agrupador': { criarAgrupador: options => criarAgrupador({ ...options, ...clock }) },
     './utils/horarios': { avaliarFuncionamento: info => avaliarFuncionamento(info, new Date(data)) },
+    './utils/funcionamento': { proximaAbertura: info => proximaAbertura(info, new Date(data)) },
     './notificacoes': { iniciarNotificacoes() {} },
     './services/pix': { iniciarPix() {}, tratarComprovantesWhatsApp: async () => false },
   };
-  vm.runInNewContext(fs.readFileSync(arquivo,'utf8'), { require: nome => mocks[nome] || requireReal(nome), process: { env: {} }, module: { exports: {} } }, { filename: arquivo });
+  vm.runInNewContext(fs.readFileSync(arquivo,'utf8'), { require: nome => mocks[nome] || requireReal(nome), process: { env: {} }, module: { exports: {} }, setInterval: () => ({ unref() {} }) }, { filename: arquivo });
   return {
-    clock, salvas, envios, agentes, criados,
+    clock, salvas, envios, agentes, criados, pausas, ignorados,
     setOnAgente: value => { onAgente = value; },
+    setResposta: value => { resposta = value; }, setConfirmar: value => { confirmar = value; },
+    setDaLoja: value => { daLoja = value; }, liberarPausa: () => { pausa = null; },
     setInfo: value => { info = value; }, setRascunho: value => { rascunho = value; },
     receber: async (texto, id, extra = {}) => handler({ body: { msg: { telefone: '5544000000000', jid: 'cliente', pushName: 'Cliente', tipo: 'conversation', texto, msgId: id, ...extra }, data: { key: { id } } } }, { status() { return this; }, json() {} }),
   };
@@ -150,4 +165,79 @@ test('atendente assumindo enquanto a IA responde impede a resposta pendente', as
   const f = webhookFixture(); f.setOnAgente(() => f.receber('Eu atendo', '2', { fromMe: true }));
   await f.receber('Quero falar com alguém', '1'); await f.clock.avancar(10000);
   assert.equal(f.agentes.length, 1); assert.equal(f.envios.length, 0);
+});
+
+// ─── Casos tirados das conversas reais de 19 a 26/10 ─────────────────────────
+test('contato da equipe/fornecedor não passa pela IA nem é gravado', async () => {
+  const f = webhookFixture(); f.ignorados.add('5544000000000');
+  await f.receber('Manda 3 gelos e troco pra 100', '1'); await f.clock.avancar(10000);
+  await f.receber('Pedido anotado!', '2', { fromMe: true });
+  assert.equal(f.agentes.length, 0); assert.equal(f.envios.length, 0); assert.equal(f.salvas.length, 0);
+});
+test('conversa iniciada pela loja: grava o contato sem IA e sem transcrever áudio', async () => {
+  const f = webhookFixture(); f.setDaLoja(true);
+  await f.receber('Tou chegando', '1'); await f.receber('', '2', { tipo: 'audioMessage', base64: 'fake' });
+  await f.clock.avancar(10000);
+  assert.equal(f.agentes.length, 0); assert.equal(f.envios.length, 0);
+  assert.deepEqual(f.salvas.map(e => e.content), ['Tou chegando', '[Áudio]']);
+  assert.ok(f.salvas.every(e => e.meta.etapa === 'conversa_da_loja' && !e.meta.transcricao));
+});
+test('loja fechada avisa uma vez só e diz quando abre', async () => {
+  const f = webhookFixture('2026-10-15T20:29:00Z');   // quinta, 17:29 em São Paulo
+  await f.receber('Boa tarde', '1'); await f.clock.avancar(10000);
+  await f.receber('Abrem hoje?', '2'); await f.clock.avancar(10000);
+  assert.equal(f.envios.length, 1);
+  assert.match(f.envios[0].texto, /Abrimos hoje às 17h30\./);
+  assert.ok(f.envios[0].texto.indexOf('Abrimos') < f.envios[0].texto.indexOf('Volte a falar'));
+  assert.equal(f.salvas.filter(e => e.role === 'user').length, 2);
+});
+test('pausa manual não inventa horário de abertura', async () => {
+  const f = webhookFixture(); f.setInfo({ loja_aberta: 'false' });
+  await f.receber('Oi', '1'); await f.clock.avancar(10000);
+  assert.doesNotMatch(f.envios[0].texto, /Abrimos/);
+});
+test('primeira mensagem com pergunta recebe a saudação fixa e depois a resposta', async () => {
+  const f = webhookFixture();
+  f.setResposta((_msg, historico) => historico.length
+    ? { texto: 'Entregamos sim! Taxa de R$ 10,00.' }
+    : { texto: cfg.mensagemInicial, modelo: null });
+  await f.receber('Bom dia, vcs entregam?', '1'); await f.clock.avancar(10000);
+  assert.deepEqual(f.envios.map(e => e.texto), [cfg.mensagemInicial, 'Entregamos sim! Taxa de R$ 10,00.']);
+  assert.equal(JSON.stringify(f.agentes[1][1]), JSON.stringify([{ role: 'assistant', content: cfg.mensagemInicial }]));
+});
+test('primeira mensagem só de cumprimento recebe apenas a saudação', async () => {
+  const f = webhookFixture();
+  f.setResposta(() => ({ texto: cfg.mensagemInicial, modelo: null }));
+  await f.receber('Boa noite, tudo bem?', '1'); await f.clock.avancar(10000);
+  assert.equal(f.envios.length, 1); assert.equal(f.agentes.length, 1);
+});
+test('atendente chamada: avisa uma vez, depois diz que já chamou, depois só registra', async () => {
+  const f = webhookFixture();
+  f.setResposta(() => ({ texto: 'Vou chamar uma atendente para te ajudar.', handoff: { motivo: 'chave pix' } }));
+  for (const [i, texto] of ['Preciso do pix', 'Ok', 'Mandaram meu pedido errado'].entries()) {
+    f.liberarPausa(); await f.receber(texto, String(i)); await f.clock.avancar(10000);
+  }
+  assert.deepEqual(f.envios.map(e => e.texto), [
+    'Vou chamar uma atendente para te ajudar.',
+    'Já avisei a equipe 🙏 Assim que alguém estiver livre, continua com você por aqui.',
+  ]);
+  assert.equal(f.pausas.length, 3);   // o painel é avisado nas três
+  assert.equal(f.salvas.filter(e => e.role === 'user').length, 3);
+  // depois que a atendente fala, um novo problema volta a ter aviso
+  await f.receber('Já resolvo', 'h', { fromMe: true }); f.liberarPausa();
+  await f.receber('Outra coisa', '9'); await f.clock.avancar(10000);
+  assert.equal(f.envios.at(-1).texto, 'Vou chamar uma atendente para te ajudar.');
+});
+test('"Sim" + "Pode fechar" no mesmo lote fecha o pedido; Pix sem chave não mostra valor de exemplo', async () => {
+  const f = webhookFixture();
+  f.setRascunho({ etapa_atual: 'aguardando_confirmacao', tipo_entrega: 'retirada' });
+  f.setInfo({ chave_pix: 'PENDENTE-chave-pix' });
+  f.setConfirmar(async () => ({ numeroPedido: 99, subtotal: 81, taxaEntrega: 0, total: 81, formaPagamento: 'pix' }));
+  await f.receber('Sim', '1'); await f.receber('Pode fechar', '2'); await f.clock.avancar(10000);
+  assert.equal(f.criados.length, 1); assert.equal(f.agentes.length, 0);
+  assert.match(f.envios[0].texto, /Pedido \*#99\* registrado/);
+  assert.match(f.envios[0].texto, /A equipe já te manda a chave PIX/);
+  assert.doesNotMatch(f.envios[0].texto, /PENDENTE|undefined/);
+  assert.ok(f.pausas.some(m => /chave/.test(m)));
+  assert.equal(f.salvas.find(e => e.role === 'assistant').meta.msgId, 'id-1');
 });

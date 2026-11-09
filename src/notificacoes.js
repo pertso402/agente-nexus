@@ -5,7 +5,7 @@
 const { createClient } = require('@supabase/supabase-js');
 const ws = require('ws');
 const { enviarTexto } = require('./services/evolution');
-const { salvarMensagem } = require('./services/supabase');
+const { salvarMensagem, sessaoDoContato } = require('./services/supabase');
 const logger = require('./logger');
 
 let _sb = null;
@@ -14,6 +14,13 @@ const sb = () => (_sb ||= createClient(process.env.SUPA_URL, process.env.SUPA_SE
 }));
 const norm = s => String(s || '').toLowerCase().trim().replace(/\s+/g, '_');
 const fmt = v => `R$ ${Number(v || 0).toFixed(2).replace('.', ',')}`;
+
+// A equipe costuma mover os cards em sequência (ou só no fim da noite): o
+// cliente recebia "em preparo", "saiu" e "entregue" em 30 segundos, ou
+// "cancelado" de madrugada para um pedido de ontem. Cada aviso espera o status
+// assentar; se o pedido já mudou de novo, só a etapa atual é enviada.
+const AGRUPAR_AVISOS_MS = Math.max(0, Number(process.env.AGRUPAR_AVISOS_SEGUNDOS ?? 45)) * 1000;
+const PEDIDO_ANTIGO_MS = 12 * 3600_000;
 
 function montarMensagem(pedido, nome) {
   const n = `*#${String(pedido.numero_pedido).padStart(3, '0')}*`;
@@ -55,7 +62,39 @@ async function atualizarAviso(aviso, campos) {
 async function enviarAviso(aviso) {
   const pedido = aviso.pedido;
   let tel, texto, msgId;
+
+  const criadoEm = new Date(aviso.criado_em).getTime();
+  if (AGRUPAR_AVISOS_MS && Date.now() - criadoEm < AGRUPAR_AVISOS_MS) {
+    // espera não é tentativa: devolve a contagem usada no backoff de falhas
+    await atualizarAviso(aviso, {
+      disponivel_em: new Date(criadoEm + AGRUPAR_AVISOS_MS).toISOString(),
+      tentativas: Math.max(0, aviso.tentativas - 1), reserva_token: null, reservado_ate: null,
+    });
+    return;
+  }
+
   try {
+    const { data: atual, error: eAtual } = await sb().from('pedidos')
+      .select('status, created_at').eq('id', pedido.id).maybeSingle();
+    if (eAtual) throw new Error(`Supabase/pedidoAviso: ${eAtual.message}`);
+    const descarte = !atual ? 'pedido removido'
+      : norm(atual.status) !== norm(aviso.status) ? `status já mudou para ${norm(atual.status)}`
+      : atual.created_at && Date.now() - new Date(atual.created_at).getTime() > PEDIDO_ANTIGO_MS ? 'pedido de mais de 12h'
+      : null;
+    if (descarte) {
+      // enviado_em preenchido tira o aviso da fila; sem whatsapp_message_id e
+      // com o motivo em ultimo_erro fica claro que nada foi mandado
+      await atualizarAviso(aviso, {
+        enviado_em: new Date().toISOString(), ultimo_erro: `não enviado: ${descarte}`,
+        reserva_token: null, reservado_ate: null,
+      });
+      logger.info('aviso/descartado', 'Aviso substituído — cliente não recebe etapa intermediária', {
+        pedido: pedido.numero_pedido, status: aviso.status, motivo: descarte,
+      });
+      return;
+    }
+
+
     const { data: cli, error } = await sb().from('clientes')
       .select('nome, telefone').eq('id', pedido.cliente_id).maybeSingle();
     if (error) throw new Error(`Supabase/clienteAviso: ${error.message}`);
@@ -81,7 +120,9 @@ async function enviarAviso(aviso) {
     enviado_em: new Date().toISOString(), telefone: tel, whatsapp_message_id: msgId,
     ultimo_erro: null, reserva_token: null, reservado_ate: null,
   });
-  await salvarMensagem(tel, 'assistant', texto, {
+  // grava na conversa em que o cliente fala (o pedido pode ter o 9 a mais)
+  const sessao = await sessaoDoContato(tel).catch(() => tel);
+  await salvarMensagem(sessao, 'assistant', texto, {
     origem: 'agente', tipo: 'texto', msgId, etapa: aviso.status,
   });
   logger.info('aviso/enviado', 'Cliente avisado da mudança de status', {

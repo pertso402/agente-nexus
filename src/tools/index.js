@@ -4,6 +4,7 @@ const db = require('../services/supabase');
 const cfg = require('../config/restaurante');
 const { avaliarFuncionamento } = require('../utils/horarios');
 const { descreverFaltando, calcularSubtotal, parseItens, normalizar } = require('../utils/pedido');
+const { chavePixValida } = require('../utils/texto');
 
 // Ordem das categorias: comida primeiro, bebidas/condimentos por último
 const ORDEM_CATEGORIA = {
@@ -71,7 +72,7 @@ const TOOL_INFO = {
   type: 'function',
   function: {
     name: 'info_restaurante',
-    description: 'Retorna chave PIX, endereço, horário, taxa de entrega e status (aberta/fechada). Use para enviar PIX ou verificar horário/taxa.',
+    description: 'Retorna chave PIX, endereço, horário, taxa de entrega e status (aberta/fechada). Use para enviar PIX ou verificar horário/taxa. Se chave_pix vier null, a chave NÃO está cadastrada: nunca invente uma — diga que a atendente envia e chame chamar_atendente.',
     parameters: { type: 'object', properties: {}, required: [] },
   },
 };
@@ -120,6 +121,19 @@ const TOOL_STATUS = {
   },
 };
 
+const TOOL_PEDIDOS = {
+  type: 'function',
+  function: {
+    name: 'consultar_pedido',
+    description: 'Situação dos pedidos recentes deste cliente (feitos pelo cardápio, pelo WhatsApp ou lançados pela equipe). Use SEMPRE que perguntarem do pedido: "já saiu?", "tá pronto?", "quanto falta?", "quero acompanhar". Responda com base nisso em vez de chamar a atendente.',
+    parameters: {
+      type: 'object',
+      properties: { numero_pedido: { type: 'number', description: 'Número do pedido, se o cliente informar (ex: 82).' } },
+      required: [],
+    },
+  },
+};
+
 const TOOL_ATENDENTE = {
   type: 'function',
   function: {
@@ -140,8 +154,24 @@ const TOOLS = [
   TOOL_INFO,
   TOOL_SALVAR,
   TOOL_STATUS,
+  TOOL_PEDIDOS,
   TOOL_ATENDENTE,
 ];
+
+// Situação em linguagem de cliente. Retirada usa a mesma coluna "saiu" do painel.
+function situacaoPedido(p) {
+  const retirada = p.tipo_entrega === 'retirada';
+  switch (String(p.status || '').toLowerCase()) {
+    case 'pendente': return 'recebido, aguardando a cozinha aceitar';
+    case 'confirmado': case 'aguardando_preparo': return 'confirmado, na fila da cozinha';
+    case 'preparando': return 'em preparo';
+    case 'pronto': return retirada ? 'pronto para retirada' : 'pronto, aguardando o motoboy';
+    case 'saiu_entrega': return retirada ? 'pronto para retirada' : 'saiu para entrega';
+    case 'entregue': return retirada ? 'já retirado' : 'entregue';
+    case 'cancelado': return 'cancelado';
+    default: return p.status;
+  }
+}
 
 // ─── EXECUTOR ─────────────────────────────────────────────────────────────────
 
@@ -201,7 +231,8 @@ async function executarTool(nome, args, contexto = {}) {
       return JSON.stringify({
         nome: info.nome || cfg.nome,
         endereco: info.endereco || '',
-        chave_pix: info.chave_pix || '',
+        // "PENDENTE-chave-pix" chegou a ser mostrado a clientes como chave real
+        chave_pix: chavePixValida(info.chave_pix) ? String(info.chave_pix).trim() : null,
         horario: funcionamento.horario,
         loja_aberta: funcionamento.aberto,
         taxa_entrega_reais: Number(info.taxa_entrega || 5),
@@ -212,7 +243,7 @@ async function executarTool(nome, args, contexto = {}) {
     case 'salvar_dados_pedido': {
       if (!telefone) return 'ERRO: telefone não disponível no contexto.';
       const atual = await db.carregarRascunho(telefone);
-      if (atual?.pedido_id && atual.etapa_atual === 'aguardando_pix') return 'Este pedido já está reservado e aguarda comprovante/conferência do Pix. Não refaça nem confirme outro pedido. Oriente enviar PDF/imagem ou chamar a atendente.';
+      if (atual?.etapa_atual === 'aguardando_pix') return 'Este pedido já está reservado e aguarda comprovante/conferência do Pix. Não refaça nem confirme outro pedido. Oriente enviar PDF/imagem ou chamar a atendente.';
 
       const campos = {};
       if (args.nome_cliente)    campos.nome_cliente    = args.nome_cliente;
@@ -260,6 +291,32 @@ async function executarTool(nome, args, contexto = {}) {
       if (!telefone) return 'ERRO: telefone não disponível.';
       const pedido = await db.atualizarStatusPedido(telefone, args.novo_status);
       return JSON.stringify({ sucesso: true, numero_pedido: pedido.numero_pedido, novo_status: args.novo_status });
+    }
+
+    case 'consultar_pedido': {
+      if (!telefone) return 'ERRO: telefone não disponível.';
+      let pedidos = await db.consultarPedidosRecentes(telefone, 24);
+      if (args.numero_pedido && !pedidos.some(p => p.numero_pedido === Number(args.numero_pedido))) {
+        pedidos = [];   // número não é deste WhatsApp: não expõe pedido de outra pessoa
+      } else if (args.numero_pedido) {
+        pedidos = pedidos.filter(p => p.numero_pedido === Number(args.numero_pedido));
+      }
+      if (!pedidos.length) {
+        return 'Nenhum pedido nas últimas 24h ligado a este WhatsApp. Pode ter sido feito com outro número ou por telefone: peça o nome usado no pedido e chame chamar_atendente para a equipe conferir.';
+      }
+      const agora = Date.now();
+      return JSON.stringify({
+        pedidos: pedidos.map(p => ({
+          numero: p.numero_pedido,
+          situacao: situacaoPedido(p),
+          tipo: p.tipo_entrega,
+          total: `R$ ${Number(p.total).toFixed(2).replace('.', ',')}`,
+          feito_ha_minutos: Math.round((agora - Date.parse(p.created_at)) / 60000),
+          ultima_mudanca_ha_minutos: Math.round((agora - Date.parse(p.updated_at || p.created_at)) / 60000),
+          itens: (p.itens_pedido || []).map(i => `${i.quantidade}x ${i.nome_produto}`),
+        })),
+        instrucao: `Informe a situação com naturalidade. Prazos de referência a partir do aceite: delivery ${cfg.prazoDelivery}, retirada ${cfg.prazoRetirada} — não prometa horário exato. Se estiver "recebido" há mais de 10 min, "em preparo" há mais de 60 min, ou o cliente relatar problema, chame chamar_atendente.`,
+      });
     }
 
     default:

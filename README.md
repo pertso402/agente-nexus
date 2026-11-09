@@ -74,7 +74,7 @@ diferentes são independentes e uma mesma conversa processa um lote por vez.
 Configure `AGRUPAR_MENSAGENS_SEGUNDOS` para mudar a espera. O tempo de geração
 da resposta vem depois dessa espera. A fila é em memória: use uma única
 instância do agente por instância da Evolution; reinícios descartam lotes pendentes.
-Avisos de status de pedidos continuam sendo enviados sem a espera de 10 segundos.
+Avisos de status de pedidos têm espera própria (45 s, veja abaixo).
 
 Depois de atualizar, reimplante o agente com `npm start` (Node.js 22+).
 
@@ -87,3 +87,38 @@ a atendente, com esse código, confirma o recebimento e libera para Novos.
 O novo Pix só é ativado em Loja → Pix com comprovante no cardápio depois de o
 agente atualizado estar conectado. Há um lembrete após 10 minutos, dentro do expediente.
 Mantenha uma instância do agente por Evolution. Não precisa atualizar a impressora.
+Enquanto `pix.sql` não for aplicado, pedidos Pix feitos pelo WhatsApp são registrados
+direto (como antes) e a equipe confere o comprovante pelo painel.
+
+## Equipe, respostas prontas e loja automática
+
+Execute `atendimento.sql` no Supabase (idempotente). Sem ele o agente funciona,
+mas ficam desligados os três itens abaixo.
+
+- **Contatos da equipe**: o número da loja também conversa com fornecedores,
+  motoboys e família. Telefones em `contatos_ignorados` (ou na variável
+  `TELEFONES_IGNORADOS`, separados por vírgula) não passam pela IA nem são
+  gravados. Este repositório é público: **não** coloque a lista em arquivo versionado.
+  Conversas que a própria loja começou também ficam fora do agente (só o texto é
+  gravado, sem transcrever áudio), até 12 h sem mensagens.
+- **Respostas prontas** (`faq_atendimento`): o que a equipe já respondeu e o agente
+  não sabia (reserva, frango misto, combo x porção...). Edite ou desative
+  (`ativo = false`) pelo Supabase; o agente recarrega a cada 5 minutos.
+- **Loja automática**: se a loja foi fechada no painel num dia anterior e ninguém
+  reabriu, o agente reabre no início do expediente e registra em `agent_logs`.
+  Fechar no próprio dia continua valendo até o dia seguinte.
+  Desligue com `REABRIR_LOJA_AUTOMATICO=false`.
+
+Outros ajustes de atendimento:
+
+- Primeira mensagem com pergunta recebe o texto fixo e, logo depois, a resposta.
+- "Loja fechada" é enviado uma vez a cada 3 h por contato, com a próxima abertura.
+- O agente consulta o pedido do cliente (`consultar_pedido`) antes de chamar a equipe.
+- Chamado de atendente: na segunda vez avisa que já chamou; depois só registra
+  (o painel continua recebendo cada motivo).
+- Histórico, pausa e pedidos tratam o telefone com e sem o 9 como o mesmo cliente.
+- Rascunho de pedido vence após `VALIDADE_RASCUNHO_HORAS` (padrão 6) ou quando a
+  equipe lança um pedido mais novo para o cliente.
+- Avisos de status esperam `AGRUPAR_AVISOS_SEGUNDOS` (padrão 45) para o status
+  assentar. Se o card já mudou de novo, só a etapa atual é enviada; pedidos com mais
+  de 12 h não geram aviso (limpeza do painel de madrugada).

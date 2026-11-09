@@ -25,7 +25,7 @@ const MAX_ITER = 8;
 // vindo de config/restaurante.js. A LLM só conversa e extrai; o CÓDIGO controla
 // o estado, valida e cria o pedido — por isso o fluxo nunca "fura".
 
-function buildSystemPrompt(rascunho, disponibilidade) {
+function buildSystemPrompt(rascunho, disponibilidade, faq = []) {
   let estado = '';
   if (rascunho) {
     const av = avaliarRascunho(rascunho);
@@ -39,8 +39,10 @@ function buildSystemPrompt(rascunho, disponibilidade) {
     ].filter(Boolean);
 
     estado = `\n\n## ESTADO ATUAL DO PEDIDO (já coletado — NÃO pergunte de novo)\n${linhas.join('\n') || '- (vazio)'}`;
-    if (rascunho.pedido_id && rascunho.etapa_atual === 'aguardando_pix') {
-      estado += '\nPedido Pix já reservado. Aguarde comprovante/conferência: não peça SIM de novo, não refaça o pedido e não confirme recebimento. O cliente pode enviar PDF ou imagem aqui ou pelo cardápio.';
+    // Sem o pix.sql o rascunho não tem pedido_id, mas o pedido já foi criado:
+    // pedir SIM de novo aqui reapresentava o resumo dias depois.
+    if (rascunho.etapa_atual === 'aguardando_pix') {
+      estado += '\nPedido Pix já registrado. Aguarde comprovante/conferência: não peça SIM de novo, não refaça o pedido e não confirme recebimento. O cliente pode enviar PDF ou imagem aqui ou pelo cardápio.';
     } else if (av.completo) {
       estado += `\n\n✅ TUDO COLETADO. Apresente o RESUMO FINAL e peça *SIM*. NÃO chame mais salvar_dados_pedido.`;
     } else {
@@ -81,7 +83,10 @@ Regras da listagem:
 - Máximo ~8 itens por mensagem. Se tiver mais, mostre os principais e ofereça o resto.
 - Termine sempre com uma pergunta curta que puxa o pedido ("Qual deles te agrada?").
 
-## SEU OBJETIVO
+${faq.length ? `## RESPOSTAS DA CASA (dadas pela equipe — use antes de chamar a atendente)
+${faq.map(f => `- ${f.pergunta}: ${f.resposta}`).join('\n')}
+
+` : ''}## SEU OBJETIVO
 Direcionar o cliente a fazer o pedido pelo cardápio digital e esclarecer dúvidas.
 Se o cliente pedir explicitamente atendimento para montar um pedido pelo chat,
 você coleta e organiza; o SISTEMA fecha o pedido, SEM falhar nenhuma etapa.
@@ -96,6 +101,8 @@ ${cfg.fluxoEspecifico}
 
 Regras transversais do fluxo:
 - SEMPRE que coletar algo, chame salvar_dados_pedido (pode ser um campo só). O retorno te diz o que ainda falta.
+- Pergunta sobre pedido já feito ("já saiu?", "tá pronto?", "quanto falta?", número do pedido): chame consultar_pedido e responda. Só chame a atendente se a ferramenta não achar o pedido, se estiver atrasado ou se houver problema.
+- Item que o cliente pediu e você NÃO achou no cardápio: nunca diga "não temos". Diga que não encontrou no cardápio digital e chame chamar_atendente para a equipe confirmar — a cozinha às vezes faz pratos que não estão cadastrados (a feijoada já foi perdida assim).
 - Se não souber responder com segurança depois de consultar as ferramentas, se houver reclamação/problema que exija decisão humana ou se o cliente pedir uma atendente, chame chamar_atendente com um resumo objetivo. Não invente uma solução nem diga que já chamou antes de usar essa ferramenta.
 - Assim que o cliente escolher um item, salve e CONFIRME de volta o item e o preço que o sistema registrou (ex: "Anotei: 1× [item] — R$ X ✅ Mais alguma coisa?"). Só avance após esse eco — é o que evita registrar o item errado.
 - Personalizações do item (sabor, meio a meio, ponto da carne, "sem cebola", borda) vão no campo "observacao" daquele item.
@@ -106,7 +113,7 @@ Regras transversais do fluxo:
 ⛔ NUNCA invente produtos, preços, chave PIX ou horário — sempre use as tools. Os preços vêm do sistema.
 ⛔ NUNCA escreva "frete incluso". A taxa de entrega é à parte (use info_restaurante para o valor).
 ⛔ NUNCA pergunte algo que já está no ESTADO ATUAL acima.
-⛔ NUNCA diga que o pedido foi confirmado/registrado por conta própria — quem confirma é o SISTEMA após o cliente dizer SIM.
+⛔ NUNCA diga que o pedido foi confirmado/registrado por conta própria — quem confirma é o SISTEMA após o cliente dizer SIM. Também não diga "vou fechar" / "vamos fechar": se a resposta ao resumo não foi um SIM claro, peça o SIM.
 ⛔ Se um item não existir no cardápio (a tool avisa em "itens_nao_encontrados"), peça para o cliente escolher um nome válido.
 ⛔ Se a loja estiver fechada (info_restaurante → loja_aberta:false), informe o horário e não monte pedido.
 ⛔ ATENÇÃO LITERAL a tamanho, sabor e quantidade (pequena ≠ média ≠ grande; um sabor ≠ outro). Use EXATAMENTE o que o cliente falou nesta mensagem. Na menor dúvida, pergunte — nunca chute.
@@ -126,7 +133,7 @@ _Responde *SIM* pra eu fechar o pedido, ou me diz se quer mudar algo._`;
 
 // ─── LOOP PRINCIPAL DO AGENTE ─────────────────────────────────────────────────
 
-async function rodarAgente(mensagemUsuario, historico, rascunho, requestId, telefone, disponibilidade) {
+async function rodarAgente(mensagemUsuario, historico, rascunho, requestId, telefone, disponibilidade, extras = {}) {
   // A abertura é fixa: a LLM não pode acrescentar alternativas ao cardápio.
   // Um rascunho ativo continua o atendimento mesmo se o histórico estiver vazio.
   if (!historico.length && !rascunho && cfg.mensagemInicial) {
@@ -156,7 +163,7 @@ async function rodarAgente(mensagemUsuario, historico, rascunho, requestId, tele
     { role: 'user', content: mensagemUsuario },
   ];
 
-  const systemMsg = { role: 'system', content: buildSystemPrompt(rascunho, disponibilidade) };
+  const systemMsg = { role: 'system', content: buildSystemPrompt(rascunho, disponibilidade, extras.faq || []) };
 
   logger.step(requestId, telefone, 'agente/chamando-openai', {
     model: MODEL,

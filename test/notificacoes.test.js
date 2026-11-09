@@ -7,7 +7,7 @@ const path = require('node:path');
 const vm = require('node:vm');
 const { PGlite } = require('@electric-sql/pglite');
 
-function carregarModulo(banco, enviar = async () => 'wamid-teste') {
+function carregarModulo(banco, enviar = async () => 'wamid-teste', { agruparSegundos = '0' } = {}) {
   const enviados = [], historico = [], logs = [], eventos = {};
   const canal = {
     on(tipo, filtro, callback) { eventos.mudanca = callback; return this; },
@@ -33,6 +33,9 @@ function carregarModulo(banco, enviar = async () => 'wamid-teste') {
             .then(r => ({ data: r.rows }));
         },
         async maybeSingle() {
+          if (tabela === 'pedidos') {
+            return { data: (await banco.query('SELECT status, created_at FROM public.pedidos WHERE id = $1', [filtros.id])).rows[0] };
+          }
           assert.equal(tabela, 'clientes');
           return { data: (await banco.query('SELECT nome, telefone FROM public.clientes WHERE id = $1', [filtros.id])).rows[0] };
         },
@@ -48,7 +51,7 @@ function carregarModulo(banco, enviar = async () => 'wamid-teste') {
     './services/evolution': { enviarTexto: async (tel, texto) => {
       enviados.push({ tel, texto }); return enviar(tel, texto);
     } },
-    './services/supabase': { salvarMensagem: async (...args) => historico.push(args) },
+    './services/supabase': { salvarMensagem: async (...args) => historico.push(args), sessaoDoContato: async tel => tel },
     './logger': Object.fromEntries(['info', 'warn', 'error'].map(nivel => [nivel, (...args) => logs.push({ nivel, args })])),
   };
   const modulo = { exports: {} };
@@ -56,7 +59,7 @@ function carregarModulo(banco, enviar = async () => 'wamid-teste') {
     module: modulo, require: nome => {
       assert.ok(Object.hasOwn(mocks, nome), `Dependência inesperada: ${nome}`); return mocks[nome];
     },
-    process: { env: Object.fromEntries(['SUPA_URL', 'SUPA_SERVICE_KEY', 'EVOLUTION_URL', 'EVOLUTION_KEY', 'EVOLUTION_INSTANCE'].map(c => [c, 'teste'])) },
+    process: { env: { ...Object.fromEntries(['SUPA_URL', 'SUPA_SERVICE_KEY', 'EVOLUTION_URL', 'EVOLUTION_KEY', 'EVOLUTION_INSTANCE'].map(c => [c, 'teste'])), AGRUPAR_AVISOS_SEGUNDOS: agruparSegundos } },
     setInterval: callback => { eventos.intervalo = callback; return { unref() {} }; },
     clearInterval() {},
   });
@@ -88,7 +91,7 @@ test('fila e gatilho executam no Postgres e o agente envia as mudanças pelo Wha
       CREATE ROLE anon; CREATE ROLE authenticated; CREATE ROLE service_role BYPASSRLS;
       CREATE TABLE public.clientes (id uuid PRIMARY KEY, nome text, telefone text);
       CREATE TABLE public.pedidos (id uuid PRIMARY KEY, cliente_id uuid, numero_pedido int, status text,
-        tipo_entrega text, total numeric);
+        tipo_entrega text, total numeric, created_at timestamptz DEFAULT now());
       GRANT SELECT, UPDATE ON public.pedidos TO anon;
       CREATE PUBLICATION supabase_realtime;
       INSERT INTO public.clientes VALUES ('${clienteId}', 'Maria Cliente', '+55 (44) 90000-0000');
@@ -132,27 +135,50 @@ test('fila e gatilho executam no Postgres e o agente envia as mudanças pelo Wha
       assert.equal((await fila()).length, 1);
     });
 
-    await t.test('recupera várias etapas com o agente desligado, na ordem e sem duplicar', async () => {
+    await t.test('cards movidos em sequência: cliente recebe só a etapa atual, sem duplicar', async () => {
       await reiniciar();
       for (const status of ['confirmado', 'preparando', 'pronto', 'saiu_entrega', 'entregue']) await mudar(status);
       const agente = carregarModulo(banco);
       await Promise.all([agente.processarFila(), agente.processarFila()]);
-      assert.equal(agente.enviados.length, 5);
-      assert.match(agente.enviados[1].texto, /entrou em preparo/);
-      assert.match(agente.enviados[2].texto, /está \*pronto\*/);
-      assert.match(agente.enviados[3].texto, /saiu para entrega/);
-      assert.ok((await fila()).every(aviso => aviso.enviado_em && aviso.whatsapp_message_id === 'wamid-teste'));
+      assert.equal(agente.enviados.length, 1);
+      assert.match(agente.enviados[0].texto, /entregue/);
       assert.equal(agente.enviados[0].tel, '5544900000000');
-      assert.equal(agente.historico.length, 5);
+      const avisos = await fila();
+      assert.ok(avisos.every(aviso => aviso.enviado_em));   // todos saíram da fila
+      assert.ok(avisos.slice(0, 4).every(a => !a.whatsapp_message_id && /não enviado: status já mudou para entregue/.test(a.ultimo_erro)));
+      assert.equal(avisos[4].whatsapp_message_id, 'wamid-teste');
+      assert.equal(agente.historico.length, 1);
       assert.equal(agente.historico[0][3].msgId, 'wamid-teste');
       const reiniciado = carregarModulo(banco);
       await reiniciado.processarFila();
       assert.equal(reiniciado.enviados.length, 0);
-      assert.equal(agente.enviados.length, 5);
     });
 
-    await t.test('envio falho fica pendente e bloqueia etapa seguinte até a retentativa', async () => {
-      await reiniciar(); await mudar('preparando'); await mudar('pronto');
+    await t.test('aviso espera o status assentar antes de sair', async () => {
+      await reiniciar(); await mudar('preparando');
+      const agente = carregarModulo(banco, undefined, { agruparSegundos: '45' });
+      await agente.processarFila();
+      assert.equal(agente.enviados.length, 0);
+      const [adiado] = await fila();
+      assert.equal(adiado.tentativas, 0);
+      assert.equal(new Date(adiado.disponivel_em) - new Date(adiado.criado_em), 45_000);
+      await banco.exec("UPDATE public.notificacoes_pedido_enviadas SET criado_em = now() - interval '50 seconds', disponivel_em = now() - interval '1 second'");
+      await agente.processarFila();
+      assert.equal(agente.enviados.length, 1);
+      assert.match(agente.enviados[0].texto, /entrou em preparo/);
+    });
+
+    await t.test('pedido de ontem cancelado na limpeza do painel não gera aviso', async () => {
+      await reiniciar();
+      await banco.exec("UPDATE public.pedidos SET created_at = now() - interval '13 hours'");
+      await mudar('cancelado');
+      const agente = carregarModulo(banco); await agente.processarFila();
+      assert.equal(agente.enviados.length, 0);
+      assert.match((await fila())[0].ultimo_erro, /mais de 12h/);
+    });
+
+    await t.test('envio falho fica pendente; na retentativa vale a etapa atual', async () => {
+      await reiniciar(); await mudar('preparando');
       const falho = carregarModulo(banco, async () => { throw new Error('Evolution indisponível'); });
       await falho.processarFila();
       assert.equal(falho.enviados.length, 1);
@@ -161,11 +187,11 @@ test('fila e gatilho executam no Postgres e o agente envia as mudanças pelo Wha
       assert.equal(pendente.enviado_em, null);
       assert.equal(pendente.reserva_token, null);
       assert.match(pendente.ultimo_erro, /Evolution/);
+      await mudar('pronto');   // a cozinha avançou enquanto a Evolution estava fora
       await banco.exec("UPDATE public.notificacoes_pedido_enviadas SET disponivel_em = now() - interval '1 second'");
       const recuperado = carregarModulo(banco); await recuperado.processarFila();
-      assert.equal(recuperado.enviados.length, 2);
-      assert.match(recuperado.enviados[0].texto, /preparo/);
-      assert.match(recuperado.enviados[1].texto, /pronto/);
+      assert.equal(recuperado.enviados.length, 1);
+      assert.match(recuperado.enviados[0].texto, /pronto/);
     });
 
     await t.test('reserva impede outro consumidor e é recuperada após reinício', async () => {
