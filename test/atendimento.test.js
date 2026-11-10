@@ -117,3 +117,65 @@ test('info_restaurante não repassa chave Pix de exemplo', async () => {
   const { executarTool } = carregarTools({}, { chave_pix: 'PENDENTE-chave-pix', loja_aberta: 'true' });
   assert.equal(JSON.parse(await executarTool('info_restaurante', {}, {})).chave_pix, null);
 });
+
+// ─── confirmar_pedido: a IA reconhece o aceite, o código fecha ───────────────
+function carregarAgenteComRespostas(respostas, executadas = []) {
+  const arquivo = path.join(__dirname, '../src/agent.js');
+  const requireReal = createRequire(arquivo);
+  const pedidos = [];
+  class OpenAIMock {
+    constructor() { this.chat = { completions: { create: async (p) => { pedidos.push(p); return respostas.shift(); } } }; }
+  }
+  const real = carregarTools({});
+  const mocks = {
+    openai: OpenAIMock,
+    './tools': { TOOLS: real.TOOLS, TOOL_CONFIRMAR: real.TOOL_CONFIRMAR, executarTool: async (nome) => { executadas.push(nome); return '{"salvo":true}'; } },
+    './services/supabase': {}, './utils/retry': { comRetry: fn => fn() },
+    './logger': { step() {}, info() {}, warn() {}, error() {} },
+  };
+  const modulo = { exports: {} };
+  vm.runInNewContext(fs.readFileSync(arquivo, 'utf8'), { module: modulo, require: n => Object.hasOwn(mocks, n) ? mocks[n] : requireReal(n), process: { env: {} } }, { filename: arquivo });
+  return { ...modulo.exports, pedidos };
+}
+const chamada = (name, id = 'c1') => ({ choices: [{ finish_reason: 'tool_calls', message: { role: 'assistant', content: null, tool_calls: [{ id, type: 'function', function: { name, arguments: '{}' } }] } }], usage: {} });
+const texto = t => ({ choices: [{ finish_reason: 'stop', message: { content: t } }], usage: {} });
+const PRONTO = { etapa_atual: 'aguardando_confirmacao', nome_cliente: 'Eduardo', tipo_entrega: 'retirada', forma_pagamento: 'pix', itens: '[{"nome":"Frango Frito Especial (G)","quantidade":1,"preco_unitario":85}]' };
+const ferramentas = p => p.tools.map(t => t.function.name);
+
+test('confirmar_pedido só existe com o resumo pronto e devolve confirmar ao código', async () => {
+  const a = carregarAgenteComRespostas([chamada('confirmar_pedido')]);
+  const r = await a.rodarAgente('[Cliente: Eduardo]\nConfirmei com a patroa', [], PRONTO, 't', '554499000000');
+  assert.equal(r.confirmar, true); assert.equal(r.texto, '');
+  assert.ok(ferramentas(a.pedidos[0]).includes('confirmar_pedido'));
+  const b = carregarAgenteComRespostas([texto('Qual tamanho?')]);
+  await b.rodarAgente('Quero frango', [], { ...PRONTO, etapa_atual: 'coletando_dados' }, 't', '554499000000');
+  assert.ok(!ferramentas(b.pedidos[0]).includes('confirmar_pedido'));
+});
+
+test('pedido alterado na mesma mensagem não fecha: a IA tem que mostrar o resumo novo', async () => {
+  const executadas = [];
+  const a = carregarAgenteComRespostas([chamada('salvar_dados_pedido', 'c1'), chamada('confirmar_pedido', 'c2'), texto('Atualizei: só peito. Confirma?')], executadas);
+  const r = await a.rodarAgente('Peito mesmo, pode mandar', [], PRONTO, 't', '554499000000');
+  assert.notEqual(r.confirmar, true);
+  assert.equal(r.texto, 'Atualizei: só peito. Confirma?');
+  assert.deepEqual(executadas, ['salvar_dados_pedido']);
+  assert.match(a.pedidos[2].messages.at(-1).content, /alterado nesta mensagem/);
+});
+
+test('mensagem de pedido fechado: cartão com itens e prazo; Pix sem chave avisa a equipe', () => {
+  const { mensagensPedidoFechado } = require('../src/utils/mensagens');
+  const rascunho = { tipo_entrega: 'retirada', itens: [{ nome: 'Tábua De Frios (G)', quantidade: 2, preco_unitario: 102 }] };
+  const cartao = mensagensPedidoFechado({ resultado: { numeroPedido: 9, subtotal: 204, taxaEntrega: 0, total: 204, formaPagamento: 'cartao' }, rascunho, prazo: '~20 minutinhos', nome: 'Ivete Nunes' });
+  assert.equal(cartao.mensagens.length, 1);
+  assert.match(cartao.mensagens[0], /2x Tábua De Frios \(G\) — R\$ 204,00/);
+  assert.match(cartao.mensagens[0], /Retirada no local/); assert.match(cartao.mensagens[0], /Bom apetite, Ivete!/);
+  assert.doesNotMatch(cartao.mensagens[0], /Taxa de entrega/);
+  const semChave = mensagensPedidoFechado({ resultado: { numeroPedido: 9, subtotal: 204, taxaEntrega: 0, total: 204, formaPagamento: 'pix' }, rascunho, info: { chave_pix: 'PENDENTE-chave-pix' } });
+  assert.equal(semChave.semChave, true); assert.equal(semChave.mensagens.length, 1);
+  assert.doesNotMatch(semChave.mensagens[0], /PENDENTE/);
+});
+
+test('aceites reais depois do resumo', () => {
+  for (const t of ['Pix\nAgora\nManda aí', 'Confirmei', 'Pode mandar a chave', 'manda o pix']) assert.equal(ehConfirmacao(t), true, t);
+  for (const t of ['Pix', 'Esse mesmo\nManda o pix\nPeito mesmo', 'Quanto tempo?']) assert.equal(ehConfirmacao(t), false, t);
+});

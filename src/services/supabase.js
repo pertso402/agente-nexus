@@ -531,13 +531,31 @@ async function consultarPedidosRecentes(telefone, horas = 24) {
   const ids = await idsClientes(telefone);
   if (!ids.length) return [];
   const { data, error } = await sb.from('pedidos')
-    .select('numero_pedido, status, tipo_entrega, forma_pagamento, total, created_at, updated_at, itens_pedido(nome_produto, quantidade)')
+    .select('id, numero_pedido, status, tipo_entrega, forma_pagamento, total, observacao, created_at, updated_at, itens_pedido(nome_produto, quantidade)')
     .in('cliente_id', ids)
     .gte('created_at', new Date(Date.now() - horas * 3600_000).toISOString())
     .order('created_at', { ascending: false })
     .limit(3);
   if (error) throw new Error(`Supabase/consultarPedidos: ${error.message}`);
   return data || [];
+}
+
+const STATUS_ENCERRADOS = ['entregue', 'cancelado'];
+
+// Pedido do cliente ainda em andamento (cardápio, WhatsApp ou painel).
+async function pedidosEmAndamento(telefone, horas = 6) {
+  return (await consultarPedidosRecentes(telefone, horas))
+    .filter(p => !STATUS_ENCERRADOS.includes(String(p.status).toLowerCase()));
+}
+
+// Sem o pix.sql não há tela de conferência: o comprovante que chega no
+// WhatsApp fica anotado no próprio pedido, que a equipe já vê no painel.
+async function anotarComprovantePix(pedido, leitura) {
+  const hora = new Date().toLocaleTimeString('pt-BR', { timeZone: 'America/Sao_Paulo', hour: '2-digit', minute: '2-digit' });
+  const nota = `Comprovante Pix recebido no WhatsApp às ${hora} — conferir na conta${leitura ? ` (leitura: ${String(leitura).slice(0, 140)})` : ''}`;
+  const observacao = [pedido.observacao, nota].filter(Boolean).join(' · ');
+  const { error } = await sb.from('pedidos').update({ observacao }).eq('id', pedido.id);
+  if (error) throw new Error(`Supabase/anotarComprovante: ${error.message}`);
 }
 
 async function atualizarStatusPedido(telefone, novoStatus) {
@@ -668,7 +686,8 @@ async function reabrirLojaSeEsquecida(agora = new Date()) {
 
 module.exports = {
   sb,
-  carregarRascunhoAtivo, consultarPedidosRecentes, conversaIniciadaPelaLoja, semConversaRecente,
+  carregarRascunhoAtivo, consultarPedidosRecentes, pedidosEmAndamento, anotarComprovantePix,
+  conversaIniciadaPelaLoja, semConversaRecente,
   contatoIgnorado, carregarFaq, mensagensRecentes, sessaoDoContato, reabrirLojaSeEsquecida,
   variantesTelefone, idsClientes,
   carregarHistorico, salvarMensagem,

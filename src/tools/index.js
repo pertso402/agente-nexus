@@ -5,6 +5,7 @@ const cfg = require('../config/restaurante');
 const { avaliarFuncionamento } = require('../utils/horarios');
 const { descreverFaltando, calcularSubtotal, parseItens, normalizar } = require('../utils/pedido');
 const { chavePixValida } = require('../utils/texto');
+const { tipoChave } = require('../utils/pix');
 
 // Ordem das categorias: comida primeiro, bebidas/condimentos por último
 const ORDEM_CATEGORIA = {
@@ -134,6 +135,18 @@ const TOOL_PEDIDOS = {
   },
 };
 
+// Só é oferecida quando o resumo final já foi apresentado (etapa
+// aguardando_confirmacao). Antes o cliente dizia "pode mandar o pix",
+// "confirmei com a patroa" e ouvia "responda exatamente SIM" três vezes.
+const TOOL_CONFIRMAR = {
+  type: 'function',
+  function: {
+    name: 'confirmar_pedido',
+    description: 'Fecha o pedido do RESUMO FINAL já apresentado. Chame quando o cliente concordar com o resumo de qualquer jeito ("sim", "pode mandar", "manda o pix", "confirmei", "esse mesmo", "fechado"). NÃO chame se ele pediu mudança, fez pergunta ou ainda não viu o resumo atualizado.',
+    parameters: { type: 'object', properties: {}, required: [] },
+  },
+};
+
 const TOOL_ATENDENTE = {
   type: 'function',
   function: {
@@ -233,9 +246,14 @@ async function executarTool(nome, args, contexto = {}) {
         endereco: info.endereco || '',
         // "PENDENTE-chave-pix" chegou a ser mostrado a clientes como chave real
         chave_pix: chavePixValida(info.chave_pix) ? String(info.chave_pix).trim() : null,
+        tipo_chave_pix: chavePixValida(info.chave_pix) ? tipoChave(info.chave_pix) : null,
+        titular_pix: String(info.pix_titular || '').trim() || null,
         horario: funcionamento.horario,
         loja_aberta: funcionamento.aberto,
         taxa_entrega_reais: Number(info.taxa_entrega || 5),
+        // do config (o tempo_entrega do banco ainda é do restaurante anterior)
+        prazo_delivery: cfg.prazoDelivery,
+        prazo_retirada: cfg.prazoRetirada,
         pedido_minimo_reais: Number(info.pedido_minimo || 0),
       });
     }
@@ -277,7 +295,7 @@ async function executarTool(nome, args, contexto = {}) {
 
       if (avaliacao.completo) {
         resumo.status = 'PRONTO_PARA_CONFIRMACAO';
-        resumo.instrucao_final = 'Todos os dados foram coletados. Apresente o RESUMO FINAL e peça para o cliente responder *SIM* para confirmar. O SISTEMA criará o pedido automaticamente — você NÃO deve criar.';
+        resumo.instrucao_final = 'Todos os dados foram coletados. Apresente o RESUMO FINAL e peça a confirmação. Quando o cliente concordar, o SISTEMA cria o pedido (na próxima mensagem você terá a ferramenta confirmar_pedido) — você NÃO deve dizer que já fechou.';
       } else {
         resumo.status = 'FALTA_COLETAR';
         resumo.falta = descreverFaltando(avaliacao.faltando);
@@ -324,4 +342,4 @@ async function executarTool(nome, args, contexto = {}) {
   }
 }
 
-module.exports = { TOOLS, executarTool };
+module.exports = { TOOLS, TOOL_CONFIRMAR, executarTool };

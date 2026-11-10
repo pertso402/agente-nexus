@@ -62,7 +62,9 @@ function webhookFixture(data = '2026-10-15T21:00:00Z') {
   const arquivo = path.join(__dirname, '../src/index.js'), requireReal = createRequire(arquivo);
   const clock = relogio(), salvas = [], envios = [], agentes = [], criados = [], pausas = [];
   const ignorados = new Set();
-  let handler, pausa = null, info = {}, rascunho = null, onAgente = null, daLoja = false;
+  let handler, pausa = null, info = {}, rascunho = null, onAgente = null, daLoja = false, andamento = [];
+  let imagem = { isComprovante: false, analise: 'Imagem de teste' };
+  const anotados = [];
   let resposta = () => ({ texto: 'Resposta única' });
   let confirmar = async () => { throw new Error('Não deveria confirmar'); };
   const db = {
@@ -80,6 +82,9 @@ function webhookFixture(data = '2026-10-15T21:00:00Z') {
     // mais nova primeiro, como no banco
     mensagensRecentes: async () => salvas.slice().reverse().map(e => ({ origem: e.meta?.origem, etapa_pedido: e.meta?.etapa || null })),
     reabrirLojaSeEsquecida: async () => null,
+    pedidosEmAndamento: async () => andamento,
+    anotarComprovantePix: async (pedido, leitura) => { anotados.push({ pedido, leitura }); },
+    limparRascunho: async () => { rascunho = null; },
   };
   const express = () => ({ use() {}, get() {}, post: (_route, fn) => { handler = fn; }, listen: (_port, fn) => fn() });
   express.json = () => ({});
@@ -87,7 +92,7 @@ function webhookFixture(data = '2026-10-15T21:00:00Z') {
     dotenv: { config() {} }, express, uuid: { v4: () => 'teste-uuid' },
     './logger': { step() {}, info() {}, error() {}, warn() {} },
     './services/evolution': { extrairMensagem: body => body.msg, enviarTexto: async (jid, texto) => { envios.push({ jid, texto }); return 'id-' + envios.length; }, enviarDigitando: async () => {} },
-    './services/media': { transcreverAudio: async () => 'Áudio de teste', analisarImagem: async () => ({ isComprovante: false, analise: 'Imagem de teste' }) },
+    './services/media': { transcreverAudio: async () => 'Áudio de teste', analisarImagem: async () => imagem },
     './services/supabase': db,
     './agent': { rodarAgente: async (...args) => { agentes.push(args); if (onAgente) await onAgente(); return resposta(...args); }, confirmarPedido: async (...args) => { criados.push(args); return confirmar(...args); } },
     './utils/retry': { comRetry: fn => fn() },
@@ -103,6 +108,7 @@ function webhookFixture(data = '2026-10-15T21:00:00Z') {
     setOnAgente: value => { onAgente = value; },
     setResposta: value => { resposta = value; }, setConfirmar: value => { confirmar = value; },
     setDaLoja: value => { daLoja = value; }, liberarPausa: () => { pausa = null; },
+    setAndamento: value => { andamento = value; }, setImagem: value => { imagem = value; }, anotados,
     setInfo: value => { info = value; }, setRascunho: value => { rascunho = value; },
     receber: async (texto, id, extra = {}) => handler({ body: { msg: { telefone: '5544000000000', jid: 'cliente', pushName: 'Cliente', tipo: 'conversation', texto, msgId: id, ...extra }, data: { key: { id } } } }, { status() { return this; }, json() {} }),
   };
@@ -240,4 +246,60 @@ test('"Sim" + "Pode fechar" no mesmo lote fecha o pedido; Pix sem chave não mos
   assert.doesNotMatch(f.envios[0].texto, /PENDENTE|undefined/);
   assert.ok(f.pausas.some(m => /chave/.test(m)));
   assert.equal(f.salvas.find(e => e.role === 'assistant').meta.msgId, 'id-1');
+});
+
+// ─── Pix e fechamento (conversas de 27/10 a 10/11) ───────────────────────────
+const RASCUNHO_PIX = {
+  etapa_atual: 'aguardando_confirmacao', tipo_entrega: 'delivery', nome_cliente: 'Eduardo Silva',
+  endereco: 'Rua Sebastião Ribas Machado e Silva, 2549 — Jardim Ibirapuera', forma_pagamento: 'pix',
+  itens: JSON.stringify([{ nome: 'Frango Frito Especial (G)', quantidade: 1, preco_unitario: 85, observacao: 'só peito' }]),
+};
+const PEDIDO_PIX = async () => ({ numeroPedido: 168, subtotal: 85, taxaEntrega: 10, total: 95, formaPagamento: 'pix' });
+test('Pix fechado: resumo com itens, endereço e total, e a chave sozinha na mensagem seguinte', async () => {
+  const f = webhookFixture();
+  f.setRascunho(RASCUNHO_PIX); f.setConfirmar(PEDIDO_PIX);
+  f.setInfo({ chave_pix: '44999163854', pix_titular: 'Vicente Dias Russi' });
+  await f.receber('Sim', '1'); await f.clock.avancar(10000);
+  assert.equal(f.envios.length, 2);
+  const [resumo, chave] = f.envios.map(e => e.texto);
+  assert.match(resumo, /Pedido \*#168\* registrado/);
+  assert.match(resumo, /1x Frango Frito Especial \(G\) — R\$ 85,00\n {3}_só peito_/);
+  assert.match(resumo, /Entrega: Rua Sebastião Ribas Machado e Silva, 2549/);
+  assert.match(resumo, /\*Total: R\$ 95,00\*/);
+  assert.match(resumo, /chave celular/); assert.match(resumo, /Titular: \*Vicente Dias Russi\*/);
+  assert.equal(chave, '44999163854');
+  assert.deepEqual(f.salvas.filter(e => e.role === 'assistant').map(e => e.meta.msgId), ['id-1', 'id-2']);
+  assert.equal(f.pausas.length, 0);
+});
+test('aceite em linguagem natural ("confirmei com a patroa") fecha pelo confirmar_pedido da IA', async () => {
+  const f = webhookFixture();
+  f.setRascunho(RASCUNHO_PIX); f.setConfirmar(PEDIDO_PIX); f.setInfo({ chave_pix: '44999163854' });
+  f.setResposta(() => ({ texto: '', confirmar: true }));
+  await f.receber('Confirmei com a patroa', '1'); await f.clock.avancar(10000);
+  assert.equal(f.agentes.length, 1); assert.equal(f.criados.length, 1);
+  assert.match(f.envios[0].texto, /#168/); assert.equal(f.envios[1].texto, '44999163854');
+});
+test('"Pix / Agora / Manda aí" depois do resumo já fecha, sem passar pela IA', async () => {
+  const f = webhookFixture();
+  f.setRascunho(RASCUNHO_PIX); f.setConfirmar(PEDIDO_PIX); f.setInfo({ chave_pix: '44999163854' });
+  await f.receber('Pix', '1'); await f.receber('Agora', '2'); await f.receber('Manda aí', '3'); await f.clock.avancar(10000);
+  assert.equal(f.agentes.length, 0); assert.equal(f.criados.length, 1);
+});
+test('comprovante com pedido Pix em aberto: anota no pedido e responde, mesmo com a loja fechada', async () => {
+  const f = webhookFixture('2026-10-16T02:00:00Z');   // 23:00, fechado
+  f.setAndamento([{ id: 'p1', numero_pedido: 127, forma_pagamento: 'pix', status: 'pendente', observacao: 'Pagamento na retirada' }]);
+  f.setImagem({ isComprovante: true, analise: 'Comprovante Pix de R$ 85,00 para Vicente Dias Russi' });
+  await f.receber('', '1', { tipo: 'imageMessage', base64: 'fake' }); await f.clock.avancar(10000);
+  assert.equal(f.agentes.length, 0); assert.equal(f.envios.length, 1);
+  assert.match(f.envios[0].texto, /Recebi o comprovante do pedido \*#127\*/);
+  assert.doesNotMatch(f.envios[0].texto, /indisponível|fora do horário/);
+  assert.equal(f.anotados.length, 1); assert.match(f.anotados[0].leitura, /R\$ 85,00/);
+});
+test('loja fechada: cliente com pedido em andamento continua sendo atendido sobre ele', async () => {
+  const f = webhookFixture('2026-10-16T02:00:00Z');
+  f.setAndamento([{ id: 'p1', numero_pedido: 127, forma_pagamento: 'cartao', status: 'preparando' }]);
+  f.setResposta(() => ({ texto: 'Seu pedido #127 está em preparo.' }));
+  await f.receber('Já saiu meu pedido?', '1'); await f.clock.avancar(10000);
+  assert.equal(f.agentes.length, 1);
+  assert.deepEqual(f.envios.map(e => e.texto), ['Seu pedido #127 está em preparo.']);
 });

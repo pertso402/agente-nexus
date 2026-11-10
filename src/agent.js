@@ -3,7 +3,7 @@
 const OpenAI = require('openai');
 const { randomUUID } = require('node:crypto');
 const cfg = require('./config/restaurante');
-const { TOOLS, executarTool } = require('./tools');
+const { TOOLS, TOOL_CONFIRMAR, executarTool } = require('./tools');
 const { salvarRascunho, limparRascunho, criarPedidoCompleto } = require('./services/supabase');
 const { avaliarRascunho, descreverFaltando, parseItens } = require('./utils/pedido');
 const { comRetry } = require('./utils/retry');
@@ -44,7 +44,7 @@ function buildSystemPrompt(rascunho, disponibilidade, faq = []) {
     if (rascunho.etapa_atual === 'aguardando_pix') {
       estado += '\nPedido Pix já registrado. Aguarde comprovante/conferência: não peça SIM de novo, não refaça o pedido e não confirme recebimento. O cliente pode enviar PDF ou imagem aqui ou pelo cardápio.';
     } else if (av.completo) {
-      estado += `\n\n✅ TUDO COLETADO. Apresente o RESUMO FINAL e peça *SIM*. NÃO chame mais salvar_dados_pedido.`;
+      estado += `\n\n✅ TUDO COLETADO. Se o resumo final ainda não foi mostrado com estes dados, apresente-o e peça a confirmação. Se o cliente já concordou com o resumo — de qualquer jeito: "sim", "pode mandar", "manda o pix", "confirmei", "esse mesmo" —, chame confirmar_pedido na hora, sem pedir para digitar SIM. Se ele mudou algo, salve com salvar_dados_pedido e mostre o resumo atualizado.`;
     } else {
       estado += `\n\n⏳ AINDA FALTA: ${descreverFaltando(av.faltando)}. Pergunte isso de forma natural.`;
     }
@@ -101,7 +101,11 @@ ${cfg.fluxoEspecifico}
 
 Regras transversais do fluxo:
 - SEMPRE que coletar algo, chame salvar_dados_pedido (pode ser um campo só). O retorno te diz o que ainda falta.
+- Prazo ("quanto tempo demora?"): responda direto — delivery ${cfg.prazoDelivery}, retirada ${cfg.prazoRetirada}, contando a partir de quando a cozinha aceita. Varia com o movimento; não chame a atendente por isso.
 - Pergunta sobre pedido já feito ("já saiu?", "tá pronto?", "quanto falta?", número do pedido): chame consultar_pedido e responda. Só chame a atendente se a ferramenta não achar o pedido, se estiver atrasado ou se houver problema.
+- Não afirme nada sobre um prato que não esteja na descrição do cardápio ou nas respostas da casa ("sem osso", "serve 4 pessoas", "vem com arroz"). Na dúvida, diga que vai confirmar com a equipe.
+- Cliente quer pagar no PIX um pedido já feito (pelo cardápio ou pelo painel): chame consultar_pedido e info_restaurante e responda com o número do pedido, o total e a chave PIX sozinha numa linha (sem nada junto, para copiar fácil), mais o titular se houver. Peça o comprovante aqui.
+- Pedido de cancelamento: se o pedido ainda está "recebido", use atualizar_status_pedido. Se já está em preparo ou saiu, diga com sinceridade que vai pedir para a equipe verificar AGORA se ainda dá, e chame chamar_atendente começando o motivo por "URGENTE — cancelamento".
 - Item que o cliente pediu e você NÃO achou no cardápio: nunca diga "não temos". Diga que não encontrou no cardápio digital e chame chamar_atendente para a equipe confirmar — a cozinha às vezes faz pratos que não estão cadastrados (a feijoada já foi perdida assim).
 - Se não souber responder com segurança depois de consultar as ferramentas, se houver reclamação/problema que exija decisão humana ou se o cliente pedir uma atendente, chame chamar_atendente com um resumo objetivo. Não invente uma solução nem diga que já chamou antes de usar essa ferramenta.
 - Assim que o cliente escolher um item, salve e CONFIRME de volta o item e o preço que o sistema registrou (ex: "Anotei: 1× [item] — R$ X ✅ Mais alguma coisa?"). Só avance após esse eco — é o que evita registrar o item errado.
@@ -113,7 +117,7 @@ Regras transversais do fluxo:
 ⛔ NUNCA invente produtos, preços, chave PIX ou horário — sempre use as tools. Os preços vêm do sistema.
 ⛔ NUNCA escreva "frete incluso". A taxa de entrega é à parte (use info_restaurante para o valor).
 ⛔ NUNCA pergunte algo que já está no ESTADO ATUAL acima.
-⛔ NUNCA diga que o pedido foi confirmado/registrado por conta própria — quem confirma é o SISTEMA após o cliente dizer SIM. Também não diga "vou fechar" / "vamos fechar": se a resposta ao resumo não foi um SIM claro, peça o SIM.
+⛔ NUNCA diga que o pedido foi confirmado/registrado por conta própria — quem fecha é o SISTEMA, quando você chama confirmar_pedido. Também não escreva "vou fechar" / "vamos fechar": se o cliente concordou, chame a ferramenta; se não ficou claro, pergunte.
 ⛔ Se um item não existir no cardápio (a tool avisa em "itens_nao_encontrados"), peça para o cliente escolher um nome válido.
 ⛔ Se a loja estiver fechada (info_restaurante → loja_aberta:false), informe o horário e não monte pedido.
 ⛔ ATENÇÃO LITERAL a tamanho, sabor e quantidade (pequena ≠ média ≠ grande; um sabor ≠ outro). Use EXATAMENTE o que o cliente falou nesta mensagem. Na menor dúvida, pergunte — nunca chute.
@@ -128,7 +132,7 @@ Regras transversais do fluxo:
 🚴 Taxa de entrega: R$ X,XX  ← só se for delivery
 💰 *Total: R$ X,XX*  ← subtotal + taxa
 
-_Responde *SIM* pra eu fechar o pedido, ou me diz se quer mudar algo._`;
+_Tá tudo certo? Me confirma que eu já fecho — ou me diz o que mudar._`;
 }
 
 // ─── LOOP PRINCIPAL DO AGENTE ─────────────────────────────────────────────────
@@ -164,6 +168,8 @@ async function rodarAgente(mensagemUsuario, historico, rascunho, requestId, tele
   ];
 
   const systemMsg = { role: 'system', content: buildSystemPrompt(rascunho, disponibilidade, extras.faq || []) };
+  const tools = rascunho?.etapa_atual === 'aguardando_confirmacao' ? [...TOOLS, TOOL_CONFIRMAR] : TOOLS;
+  let confirmar = false, alterouPedido = false;
 
   logger.step(requestId, telefone, 'agente/chamando-openai', {
     model: MODEL,
@@ -176,7 +182,7 @@ async function rodarAgente(mensagemUsuario, historico, rascunho, requestId, tele
       model: MODEL,
       max_completion_tokens: MAX_TOKENS,
       messages: [systemMsg, ...messages],
-      tools: TOOLS,
+      tools,
       tool_choice: 'auto',
       parallel_tool_calls: false,
     }),
@@ -205,6 +211,21 @@ async function rodarAgente(mensagemUsuario, historico, rascunho, requestId, tele
         continue;
       }
 
+      if (nomeTool === 'confirmar_pedido') {
+        // Mudou o pedido nesta mesma mensagem: o cliente ainda não viu o resumo novo.
+        if (alterouPedido) {
+          toolResults.push({ role: 'tool', tool_call_id: toolCall.id, content: 'O pedido foi alterado nesta mensagem. Mostre o RESUMO FINAL atualizado e peça a confirmação antes de fechar.' });
+          toolCalls.push({ name: nomeTool, args: {}, ms: 0, ok: false, erro: 'pedido alterado na mesma rodada' });
+          continue;
+        }
+        confirmar = true;
+        toolCalls.push({ name: nomeTool, args: {}, ms: 0, ok: true });
+        logger.step(requestId, telefone, 'pedido/confirmado-pela-ia');
+        toolResults.push({ role: 'tool', tool_call_id: toolCall.id, content: 'Pedido sendo fechado pelo sistema.' });
+        continue;
+      }
+      if (nomeTool === 'salvar_dados_pedido') alterouPedido = true;
+
       logger.step(requestId, telefone, `tool/${nomeTool}`, { args });
 
       let resultado;
@@ -223,14 +244,14 @@ async function rodarAgente(mensagemUsuario, historico, rascunho, requestId, tele
     }
 
     messages.push(...toolResults);
-    if (handoff) break;
+    if (handoff || confirmar) break;
 
     resposta = await comRetry(
       () => openai.chat.completions.create({
         model: MODEL,
         max_completion_tokens: MAX_TOKENS,
         messages: [systemMsg, ...messages],
-        tools: TOOLS,
+        tools,
         tool_choice: 'auto',
         parallel_tool_calls: false,
       }),
@@ -241,6 +262,10 @@ async function rodarAgente(mensagemUsuario, historico, rascunho, requestId, tele
 
   if (iteracoes >= MAX_ITER) {
     logger.warn('agente/max-iter', 'Limite de iterações atingido', { requestId, telefone });
+  }
+
+  if (confirmar) {
+    return { texto: '', confirmar: true, toolCalls, modelo: MODEL, latenciaMs: Date.now() - t0, tokensEntrada, tokensSaida };
   }
 
   if (handoff) {

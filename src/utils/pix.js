@@ -60,4 +60,4 @@ function escolherPedido(pedidos, texto) {
  if(m) return pedidos.find(p=>String(p.numero_pedido)===String(Number(m[1]))) || null;
  return pedidos.length===1?pedidos[0]:null;
 }
-module.exports={MAX_ARQUIVO,validarArquivo,compararComprovante,escolherPedido};
+module.exports={MAX_ARQUIVO,validarArquivo,compararComprovante,escolherPedido,tipoChave};

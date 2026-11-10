@@ -15,6 +15,7 @@ const {
   mensagemJaRegistrada,
   contatoIgnorado, conversaIniciadaPelaLoja, semConversaRecente,
   carregarFaq, mensagensRecentes, reabrirLojaSeEsquecida,
+  pedidosEmAndamento, anotarComprovantePix,
 } = require('./services/supabase');
 const { rodarAgente, confirmarPedido } = require('./agent');
 const { comRetry } = require('./utils/retry');
@@ -24,7 +25,8 @@ const { iniciarPix, tratarComprovantesWhatsApp } = require('./services/pix');
 const { criarAgrupador } = require('./utils/agrupador');
 const { avaliarFuncionamento } = require('./utils/horarios');
 const { proximaAbertura } = require('./utils/funcionamento');
-const { apenasSaudacao, ehConfirmacao, chavePixValida } = require('./utils/texto');
+const { apenasSaudacao, ehConfirmacao } = require('./utils/texto');
+const { mensagensPedidoFechado } = require('./utils/mensagens');
 const ESPERA_MENSAGENS_MS = Math.max(1, Number(process.env.AGRUPAR_MENSAGENS_SEGUNDOS) || 10) * 1000;
 const agrupador = criarAgrupador({
   esperaMs: ESPERA_MENSAGENS_MS,
@@ -34,8 +36,6 @@ const agrupador = criarAgrupador({
 
 const app = express();
 app.use(express.json({ limit: '10mb' }));
-
-const fmt = (v) => `R$ ${Number(v).toFixed(2).replace('.', ',')}`;
 
 // ─── DEDUPLICAÇÃO DE MENSAGENS ────────────────────────────────────────────────
 const msgProcessadas = new Map();
@@ -329,10 +329,33 @@ async function processarMensagens(entradas) {
       return;
     }
 
+    // Comprovante de Pix (sem o pix.sql, que tem fluxo próprio): anota no pedido
+    // em aberto para a equipe conferir e avisa o cliente — mesmo com a loja já
+    // fechada (cliente pagou às 22:46 e recebeu "atendimento indisponível").
+    if (isComprovante) {
+      const [pedidoPix] = (await pedidosEmAndamento(telefone, 6).catch(() => []))
+        .filter(p => String(p.forma_pagamento).toLowerCase() === 'pix');
+      if (pedidoPix) {
+        await salvarEntradas();
+        const leitura = preparadas.find(e => e.isComprovante)?.meta?.analiseImagem;
+        await anotarComprovantePix(pedidoPix, leitura)
+          .catch(err => logger.error('pix/anotar-comprovante', err.message, { requestId, telefone }));
+        await limparRascunho(telefone).catch(() => {});
+        const texto = `Recebi o comprovante do pedido *#${pedidoPix.numero_pedido}* ✅\n\nA equipe confere o recebimento na conta e libera pra cozinha. Assim que entrar em preparo, te aviso por aqui 🍻`;
+        const id = await comRetry(() => enviarTexto(jid, texto), { tentativas: 3, requestId, etapa: 'enviarComprovanteRecebido' });
+        await salvarMensagem(telefone, 'assistant', texto, { origem: 'agente', tipo: 'texto', msgId: id, requestId, etapa: 'pix/comprovante' });
+        return;
+      }
+    }
+
     // O bloqueio é determinístico: vale antes da saudação, IA e confirmação.
+    // Exceção: quem tem pedido em andamento continua sendo atendido sobre ele
+    // (pedido novo continua bloqueado no banco e em criarPedidoCompleto).
     const info = await buscarInfo();
     const disponibilidade = avaliarFuncionamento(info);
-    if (!disponibilidade.aberto) {
+    const emAndamento = !disponibilidade.aberto &&
+      (await pedidosEmAndamento(telefone, 6).catch(() => [])).length > 0;
+    if (!disponibilidade.aberto && !emAndamento) {
       await salvarEntradas();
       // Um aviso basta: teve cliente recebendo o mesmo texto 4 vezes seguidas.
       const recentes = await mensagensRecentes(telefone, 3).catch(() => []);
@@ -358,40 +381,22 @@ async function processarMensagens(entradas) {
     // Grava o lote inteiro na ordem antes da resposta, sem duplicar no contexto.
     await salvarEntradas();
 
-    // ── FLUXO 2: confirmação SIM (código cria o pedido) ──────────────────────
-    if (ehConfirmacao(conteudo) && rascunho?.etapa_atual === 'aguardando_confirmacao') {
-      logger.step(requestId, telefone, 'pedido/confirmando-via-SIM');
+    // ── FLUXO 2: fechar o pedido (o código cria; o cliente ou a IA confirmam) ─
+    const fecharPedido = async (rascunhoAtual) => {
       await enviarDigitando(jid, 1500);
       try {
-        const r = await confirmarPedido(rascunho, telefone, requestId);
-
-        let txt;
-        const linhaTaxa = r.taxaEntrega > 0 ? `🚴 Taxa de entrega: ${fmt(r.taxaEntrega)}\n` : '';
-        const corpo =
-          `🛍️ Subtotal: ${fmt(r.subtotal)}\n` + linhaTaxa + `💰 *Total: ${fmt(r.total)}*\n\n`;
-
-        let semChave = false;
-        if (r.formaPagamento === 'pix') {
-          const chave = [r.chavePix, info.chave_pix].find(chavePixValida);
-          semChave = !chave;
-          txt = `✅ Pedido *#${r.numeroPedido}* registrado!\n\n` + corpo +
-            (chave ? `📱 *Chave PIX:* \`${chave}\`\n\n` : '📱 A equipe já te manda a chave PIX por aqui.\n\n') +
-            (r.linkPix ? `Envie o comprovante em PDF ou imagem por aqui, ou anexe no link:\n${r.linkPix}` : 'Depois do pagamento, é só mandar o comprovante aqui.') +
-            '\n\nA equipe confere o recebimento na conta para liberar o pedido. 😊';
-        } else {
-          const prazo = rascunho.tipo_entrega === 'delivery' ? cfg.prazoDelivery : cfg.prazoRetirada;
-          txt = `✅ Pedido *#${r.numeroPedido}* confirmado!\n\n` + corpo +
-            `Já tá indo pra cozinha! ⏱️ Previsão: ${prazo}. Bom apetite, ${pushName}! 🍻`;
+        const r = await confirmarPedido(rascunhoAtual, telefone, requestId);
+        const prazo = rascunhoAtual.tipo_entrega === 'delivery' ? cfg.prazoDelivery : cfg.prazoRetirada;
+        const { mensagens, semChave } = mensagensPedidoFechado({
+          resultado: r, rascunho: rascunhoAtual, info, prazo, nome: rascunhoAtual.nome_cliente || pushName,
+        });
+        await salvarEntradas();
+        for (const [i, txt] of mensagens.entries()) {
+          // o id evita que o eco desta mensagem seja lido como atendente humana
+          const id = await comRetry(() => enviarTexto(jid, txt), { tentativas: 3, requestId, etapa: 'enviarConfirmacao' });
+          await salvarMensagem(telefone, 'assistant', txt, { origem: 'agente', tipo: 'texto', msgId: id, requestId, etapa: i ? 'pix/chave' : rascunhoAtual.etapa_atual });
         }
-
-        // o id evita que o eco desta mensagem seja lido como atendente humana
-        const idConfirmacao = await comRetry(() => enviarTexto(jid, txt), { tentativas: 3, requestId, etapa: 'enviarConfirmacao' });
-        await Promise.all([
-          salvarEntradas(),
-          salvarMensagem(telefone, 'assistant', txt, { origem: 'agente', tipo: 'texto', msgId: idConfirmacao, requestId, etapa: rascunho?.etapa_atual }),
-        ]);
         if (semChave) await pausarAtendimento(telefone, `handoff: pedido #${r.numeroPedido} em Pix — enviar a chave ao cliente (chave não cadastrada no sistema)`);
-        return;
       } catch (err) {
         logger.error('pedido/confirmar/erro', err.message, { requestId, telefone, faltando: err.faltando, stack: err.stack });
         const falta = ['LOJA_FECHADA', 'PIX_INDISPONIVEL'].includes(err.code) ? err.message : err.faltando?.length
@@ -402,8 +407,11 @@ async function processarMensagens(entradas) {
           salvarEntradas(),
           salvarMensagem(telefone, 'assistant', `Opa! ${falta}`, { origem: 'agente', tipo: 'texto', msgId: idFalta, requestId, erro: err.message }),
         ]);
-        return;
       }
+    };
+    if (ehConfirmacao(conteudo) && rascunho?.etapa_atual === 'aguardando_confirmacao') {
+      logger.step(requestId, telefone, 'pedido/confirmando-via-SIM');
+      return fecharPedido(rascunho);
     }
 
     // ── FLUXO 3: agente conversacional ───────────────────────────────────────
@@ -412,12 +420,19 @@ async function processarMensagens(entradas) {
     const faq = await carregarFaq().catch(() => []);
     const r = await rodarAgente(msgParaAgente, historico, rascunho, requestId, telefone, disponibilidade, { faq });
 
+    // "Pode mandar o pix", "confirmei com a patroa": a IA reconheceu o aceite.
+    if (r.confirmar) {
+      const atual = await carregarRascunhoAtivo(telefone);
+      if (atual?.etapa_atual === 'aguardando_confirmacao') return fecharPedido(atual);
+      r.texto = 'Me confirma de novo, por favor: posso fechar o pedido?';
+    }
+
     // Envia uma resposta do agente. Devolve true quando a conversa deve parar.
     const responder = async (r) => {
       // A atendente ou o fechamento podem ter ocorrido enquanto a IA respondia.
       if (await carregarPausaAtiva(telefone)) return true;
       const funcionamentoAtual = avaliarFuncionamento(await buscarInfo());
-      if (!funcionamentoAtual.aberto) {
+      if (!funcionamentoAtual.aberto && !emAndamento) {
         r.texto = funcionamentoAtual.mensagem;
         r.handoff = null;
       }

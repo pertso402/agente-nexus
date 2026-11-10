@@ -35,11 +35,13 @@ function apenasSaudacao(texto) {
 const AFIRMA = new Set([
   'sim', 'simm', 'simmm', 's', 'isso', 'pode', 'confirmar', 'confirma', 'confirmo', 'confirmado',
   'fechar', 'fecha', 'fechado', 'fechou', 'ok', 'okay', 'okk', 'certo', 'correto', 'beleza', 'blz',
-  'perfeito', 'manda', 'mandar', 'bora', 'finalizar', 'finaliza', '1',
+  'perfeito', 'manda', 'mandar', 'mande', 'envia', 'envie', 'confirmei', 'bora', 'finalizar', 'finaliza', '1',
 ]);
 const NEUTRA = new Set([
   'mesmo', 'ser', 'ta', 'esta', 'tudo', 'por', 'favor', 'pf', 'pfv', 'obrigado', 'obrigada', 'obg', 'valeu',
   'vlw', 'pode', 'entao', 'ai', 'la', 'o', 'a', 'meu', 'pedido', 'show', 'top', 'otimo', 'certinho', 'sim',
+  // "Pix / Agora / Manda aí" depois do resumo é aceite, não pergunta
+  'pix', 'chave', 'agora', 'ja', 'esse', 'essa', 'assim',
 ]);
 
 function ehConfirmacao(texto) {

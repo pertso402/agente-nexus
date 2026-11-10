@@ -104,6 +104,16 @@ async function enviarAviso(aviso) {
     if (!texto) throw new Error(`Status de aviso desconhecido: ${pedido.status}`);
     msgId = await enviarTexto(tel, texto);
   } catch (err) {
+    // 400 da Evolution = número que não existe no WhatsApp (telefone digitado
+    // errado). O aviso do pedido #90 ficou 2 semanas tentando a cada 5 min.
+    if (err.response?.status === 400 && aviso.tentativas >= 5) {
+      await atualizarAviso(aviso, {
+        enviado_em: new Date().toISOString(), reserva_token: null, reservado_ate: null,
+        ultimo_erro: `não enviado: a Evolution recusou o número ${tel || '(sem telefone)'} — confira o telefone do cliente`,
+      });
+      logger.warn('aviso/numero-invalido', 'Aviso abandonado: número recusado pela Evolution', { pedido: pedido.numero_pedido, status: aviso.status });
+      return;
+    }
     const esperaMs = Math.min(300_000, 5_000 * 2 ** Math.min(aviso.tentativas - 1, 6));
     await atualizarAviso(aviso, {
       ultimo_erro: String(err.message).slice(0, 500),

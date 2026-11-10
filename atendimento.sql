@@ -66,6 +66,8 @@ GRANT SELECT, INSERT, UPDATE, DELETE ON public.faq_atendimento TO service_role;
 INSERT INTO public.faq_atendimento (pergunta, resposta, ordem) VALUES
   ('Frango Frito Especial x Combo',
    'O Frango Frito Especial é só o frango com molho branco. Com arroz e salada é o Combo Frango Frito Especial C/ Arroz E Salada. Na dúvida, confirme com o cliente qual dos dois ele quer.', 10),
+  ('Peito de frango é sem osso?',
+   'Não. O peito não é desossado: é a parte com menos osso. Nunca diga que vem sem osso.', 15),
   ('Frango frito misto (coxa/sobrecoxa e peito juntos)',
    'Dá pra fazer a porção mista: é só pedir e escrever "misto" na observação do item.', 20),
   ('Reserva de mesa',
